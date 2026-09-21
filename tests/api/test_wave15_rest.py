@@ -21,7 +21,7 @@ import pytest
 
 from bond_accounting.auth import JwtService
 from bond_accounting.config.settings import AuthConfig
-from bond_accounting.db.models import Bond, Transaction
+from bond_accounting.db.models import Bond, Broker, BrokerAccount, Transaction
 from tests.rest_utils import _bond_payload, _register
 
 if TYPE_CHECKING:
@@ -177,10 +177,19 @@ async def _portfolio_client_with_annual_bond(
         )
         session.add(bond)
         await session.flush()
+        broker = Broker(name="Coupon grid broker", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        account = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        session.add(account)
+        await session.flush()
         session.add(
             Transaction(
                 user_id=user_id,
                 bond_id=bond.id,
+                broker_account_id=account.id,
                 type="BUY",
                 quantity=10,
                 price=1000.0,

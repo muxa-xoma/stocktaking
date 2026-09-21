@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from bond_accounting.db.models import TRANSACTION_TYPES, Transaction, User
+from bond_accounting.db.models import (
+    TRANSACTION_TYPES,
+    BrokerAccount,
+    Transaction,
+    User,
+)
 from bond_accounting.event_bus import Topic
 from bond_accounting.portfolio.dto import PositionDTO, TransactionCreate, TransactionDTO
 from bond_accounting.portfolio.netting import net_position
@@ -129,6 +134,17 @@ class PortfolioService:
         async with self._session_factory() as session:
             try:
                 async with session.begin():
+                    account = await session.scalar(
+                        select(BrokerAccount).where(
+                            BrokerAccount.id == data.broker_account_id,
+                            BrokerAccount.user_id == user_id,
+                        )
+                    )
+                    if account is None:
+                        raise InvalidTransactionError(
+                            f"Broker account {data.broker_account_id} not found or not "
+                            f"owned by user {user_id}"
+                        )
                     # Lock the user row so concurrent SELL/MATURE position
                     # checks for the same user serialize against each other
                     # (see the docstring for the full strategy). If the user
@@ -139,7 +155,12 @@ class PortfolioService:
                     )
                     if data.type in ("SELL", "MATURE"):
                         current = self._quantity_of(
-                            await self._load_transactions(session, user_id, data.bond_id)
+                            await self._load_transactions(
+                                session,
+                                user_id,
+                                data.bond_id,
+                                broker_account_id=data.broker_account_id,
+                            )
                         )
                         if current < data.quantity:
                             raise InsufficientPositionError(
@@ -155,17 +176,22 @@ class PortfolioService:
                         price=data.price,
                         date=data.date,
                         commission=data.commission,
+                        broker_account_id=data.broker_account_id,
                     )
                     session.add(txn)
             except IntegrityError as exc:
                 raise InvalidTransactionError(
-                    f"Transaction rejected by the database for user {user_id}, bond {data.bond_id}: {exc.orig}"
+                    f"Transaction rejected by the database for user {user_id}, "
+                    f"bond {data.bond_id}: {exc.orig}"
                 ) from exc
 
         dto = TransactionDTO.from_orm(txn)
         position = await self.get_position(user_id, data.bond_id)
         logger.info(
-            "Recorded transaction id=%s type=%s user_id=%s bond_id=%s quantity=%s price=%s; position is now %s unit(s)",
+            (
+                "Recorded transaction id=%s type=%s user_id=%s bond_id=%s quantity=%s price=%s; "
+                "position is now %s unit(s)"
+            ),
             dto.id,
             dto.type,
             dto.user_id,
@@ -183,13 +209,15 @@ class PortfolioService:
     # queries
 
     async def list_transactions(
-        self, user_id: int, bond_id: int | None = None
+        self, user_id: int, bond_id: int | None = None, broker_account_id: int | None = None
     ) -> list[TransactionDTO]:
         """List transactions for a user, optionally filtered by bond.
 
         Args:
             user_id: User whose transactions are listed.
             bond_id: When given, only transactions on this bond are returned.
+            broker_account_id: When given, only transactions on this broker
+                account are returned.
 
         Returns:
             Transactions ordered by ``date``, then ``id``.
@@ -197,41 +225,52 @@ class PortfolioService:
         stmt = select(Transaction).where(Transaction.user_id == user_id)
         if bond_id is not None:
             stmt = stmt.where(Transaction.bond_id == bond_id)
+        if broker_account_id is not None:
+            stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
         stmt = stmt.order_by(Transaction.date, Transaction.id)
         async with self._session_factory() as session:
             result = await session.execute(stmt)
             return [TransactionDTO.from_orm(txn) for txn in result.scalars().all()]
 
-    async def get_position(self, user_id: int, bond_id: int) -> PositionDTO:
+    async def get_position(
+        self, user_id: int, bond_id: int, broker_account_id: int | None = None
+    ) -> PositionDTO:
         """Current position for one user-bond pair.
 
         Args:
             user_id: User whose position is computed.
             bond_id: Bond the position is held in.
+            broker_account_id: When given, restrict the computation to
+                transactions on this broker account.
 
         Returns:
             The derived position; a pair with no history yields a closed
             (zero) position, not an error.
         """
         async with self._session_factory() as session:
-            txns = await self._load_transactions(session, user_id, bond_id)
+            txns = await self._load_transactions(
+                session, user_id, bond_id, broker_account_id=broker_account_id
+            )
         return self._to_position(user_id, bond_id, txns)
 
-    async def get_all_positions(self, user_id: int) -> list[PositionDTO]:
+    async def get_all_positions(
+        self, user_id: int, broker_account_id: int | None = None
+    ) -> list[PositionDTO]:
         """All non-zero positions for a user.
 
         Args:
             user_id: User whose positions are computed.
+            broker_account_id: When given, restrict the computation to
+                transactions on this broker account.
 
         Returns:
             Positions with ``quantity != 0``, keyed by bond.
         """
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(Transaction)
-                .where(Transaction.user_id == user_id)
-                .order_by(Transaction.date, Transaction.id)
-            )
+            stmt = select(Transaction).where(Transaction.user_id == user_id)
+            if broker_account_id is not None:
+                stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
+            result = await session.execute(stmt.order_by(Transaction.date, Transaction.id))
             txns = list(result.scalars().all())
 
         grouped: dict[int, list[Transaction]] = {}
@@ -244,12 +283,16 @@ class PortfolioService:
             if (position := self._to_position(user_id, bond_id, rows)).quantity != 0
         ]
 
-    async def get_position_value(self, user_id: int, bond_id: int) -> float:
+    async def get_position_value(
+        self, user_id: int, bond_id: int, broker_account_id: int | None = None
+    ) -> float:
         """Value the position at the average-cost price of the open position.
 
         Args:
             user_id: User whose position is valued.
             bond_id: Bond the position is held in.
+            broker_account_id: When given, restrict the computation to
+                transactions on this broker account.
 
         Returns:
             ``quantity * avg_buy_price`` using the same average-cost basis
@@ -257,7 +300,9 @@ class PortfolioService:
             position (nothing held or no history at all).
         """
         async with self._session_factory() as session:
-            txns = await self._load_transactions(session, user_id, bond_id)
+            txns = await self._load_transactions(
+                session, user_id, bond_id, broker_account_id=broker_account_id
+            )
         quantity, avg_buy_price = net_position(txns)
         if quantity > 0 and avg_buy_price is not None:
             return quantity * avg_buy_price
@@ -268,14 +313,18 @@ class PortfolioService:
 
     @staticmethod
     async def _load_transactions(
-        session: AsyncSession, user_id: int, bond_id: int
+        session: AsyncSession,
+        user_id: int,
+        bond_id: int,
+        broker_account_id: int | None = None,
     ) -> list[Transaction]:
         """Fetch all transactions for one user-bond pair, ordered by date, id."""
-        result = await session.execute(
-            select(Transaction)
-            .where(Transaction.user_id == user_id, Transaction.bond_id == bond_id)
-            .order_by(Transaction.date, Transaction.id)
+        stmt = select(Transaction).where(
+            Transaction.user_id == user_id, Transaction.bond_id == bond_id
         )
+        if broker_account_id is not None:
+            stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
+        result = await session.execute(stmt.order_by(Transaction.date, Transaction.id))
         return list(result.scalars().all())
 
     @staticmethod

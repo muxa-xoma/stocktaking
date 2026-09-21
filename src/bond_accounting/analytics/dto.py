@@ -151,8 +151,16 @@ class PortfolioQueryParams(NextCouponsParams, CashflowsParams):
     into one here instead of being declared as two ``Annotated[..., Query()]``
     parameters. Field names (and therefore the REST query parameters) are
     unchanged: ``next_coupons_horizon_days`` / ``next_coupons_limit`` and
-    ``cashflows_horizon_days`` / ``cashflows_limit``.
+    ``cashflows_horizon_days`` / ``cashflows_limit``. The same rule applies
+    to ``broker_account_id``: it lives here rather than in a separate
+    endpoint parameter, otherwise FastAPI stops expanding the model and
+    demands a literal ``params`` query field.
     """
+
+    broker_account_id: int | None = Field(
+        default=None,
+        description="Restrict the summary to transactions on this broker account.",
+    )
 
 
 class PortfolioSummary(BaseModel):

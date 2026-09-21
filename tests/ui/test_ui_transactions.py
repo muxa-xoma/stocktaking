@@ -9,6 +9,7 @@ from tests.ui._ui_utils import (
     authenticate,
     click,
     eventually,
+    make_account,
     make_bond,
     make_transaction,
     one,
@@ -36,6 +37,7 @@ async def test_transactions_page_renders_history(
         {
             "date": "10.01.2026",
             "isin": "RU000A0JX0J2",
+            "account": "#1",
             "type": "Покупка",
             "quantity": 10,
             "price": "980.50",
@@ -44,6 +46,7 @@ async def test_transactions_page_renders_history(
         {
             "date": "10.01.2026",
             "isin": "RU000A0JX0J2",
+            "account": "#1",
             "type": "Продажа",
             "quantity": 3,
             "price": "1010.25",
@@ -92,10 +95,11 @@ async def test_transaction_with_deleted_bond_shows_placeholder(
 
 
 async def test_add_transaction_success(
-    ui_user, valid_token, portfolio_service, bond_service
+    ui_user, valid_token, portfolio_service, bond_service, broker_service
 ) -> None:
     """Форма сделки: значения передаются в сервис, история обновляется."""
     bond_service.list_all.return_value = [make_bond()]
+    broker_service.list_accounts_for_user.return_value = [make_account()]
     portfolio_service.list_transactions.return_value = []
     portfolio_service.add_transaction.return_value = make_transaction()
     authenticate(ui_user, valid_token)
@@ -103,12 +107,15 @@ async def test_add_transaction_success(
     await ui_user.open("/transactions")
 
     bond_select = one(ui_user, kind=ui.select, content="Облигация")
+    account_select = one(ui_user, kind=ui.select, content="Брокер / Счёт")
     type_select = one(ui_user, kind=ui.select, content="Тип")
     quantity_input = one(ui_user, kind=ui.number, content="Количество")
     price_input = one(ui_user, kind=ui.number, content="Цена")
     date_input = one(ui_user, kind=ui.date_input, content="Дата")
     commission_input = one(ui_user, kind=ui.number, content="Комиссия")
 
+    # Первый (и единственный) счёт предвыбран селектором автоматически.
+    assert account_select.value == 1
     bond_select.value = 1
     type_select.value = "SELL"
     quantity_input.value = 5
@@ -122,6 +129,7 @@ async def test_add_transaction_success(
     user_id, txn = portfolio_service.add_transaction.await_args.args
     assert user_id == 1
     assert txn.bond_id == 1
+    assert txn.broker_account_id == 1
     assert txn.type == "SELL"
     assert txn.quantity == 5
     assert txn.price == 1010.5
@@ -131,10 +139,11 @@ async def test_add_transaction_success(
 
 
 async def test_add_transaction_without_bond_shows_notification(
-    ui_user, valid_token, portfolio_service, bond_service
+    ui_user, valid_token, portfolio_service, bond_service, broker_service
 ) -> None:
     """Облигация не выбрана: предупреждение, сервис не вызывается."""
     bond_service.list_all.return_value = [make_bond()]
+    broker_service.list_accounts_for_user.return_value = [make_account()]
     portfolio_service.list_transactions.return_value = []
     authenticate(ui_user, valid_token)
 
@@ -146,10 +155,11 @@ async def test_add_transaction_without_bond_shows_notification(
 
 
 async def test_add_transaction_invalid_date_shows_validation_error(
-    ui_user, valid_token, portfolio_service, bond_service
+    ui_user, valid_token, portfolio_service, bond_service, broker_service
 ) -> None:
     """Пустая дата сделки: ошибка валидации, сервис не вызывается."""
     bond_service.list_all.return_value = [make_bond()]
+    broker_service.list_accounts_for_user.return_value = [make_account()]
     portfolio_service.list_transactions.return_value = []
     authenticate(ui_user, valid_token)
 
@@ -162,10 +172,11 @@ async def test_add_transaction_invalid_date_shows_validation_error(
 
 
 async def test_add_transaction_portfolio_error_shows_notification(
-    ui_user, valid_token, portfolio_service, bond_service
+    ui_user, valid_token, portfolio_service, bond_service, broker_service
 ) -> None:
     """Бизнес-ошибка сервиса (например, продажа без позиции) показывается тостом."""
     bond_service.list_all.return_value = [make_bond()]
+    broker_service.list_accounts_for_user.return_value = [make_account()]
     portfolio_service.list_transactions.return_value = []
     portfolio_service.add_transaction.side_effect = PortfolioError("Недостаточно облигаций")
     authenticate(ui_user, valid_token)
@@ -183,10 +194,11 @@ async def test_add_transaction_portfolio_error_shows_notification(
 
 
 async def test_add_transaction_unexpected_error(
-    ui_user, valid_token, portfolio_service, bond_service
+    ui_user, valid_token, portfolio_service, bond_service, broker_service
 ) -> None:
     """Сбой сервиса при записи сделки: общий тост об ошибке."""
     bond_service.list_all.return_value = [make_bond()]
+    broker_service.list_accounts_for_user.return_value = [make_account()]
     portfolio_service.list_transactions.return_value = []
     portfolio_service.add_transaction.side_effect = RuntimeError("db down")
     authenticate(ui_user, valid_token)

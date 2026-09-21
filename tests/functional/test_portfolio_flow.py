@@ -15,6 +15,7 @@ from tests.functional._functional_utils import (
     _create_bond,
     _register_and_login,
 )
+from tests.rest_utils import _create_account_for_user
 
 if TYPE_CHECKING:
     import httpx
@@ -24,12 +25,15 @@ async def test_transactions_and_portfolio_flow(client: httpx.AsyncClient) -> Non
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
     bond_id = bond["id"]
+    # TransactionCreate requires a broker_account_id owned by the caller.
+    account = await _create_account_for_user(client, headers)
 
     # BUY 10 @ 1000, commission 5.
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond_id,
+            "broker_account_id": account["id"],
             "type": "BUY",
             "quantity": 10,
             "price": 1000.0,
@@ -48,6 +52,7 @@ async def test_transactions_and_portfolio_flow(client: httpx.AsyncClient) -> Non
         "/api/transactions",
         json={
             "bond_id": bond_id,
+            "broker_account_id": account["id"],
             "type": "SELL",
             "quantity": 4,
             "price": 1050.0,
@@ -110,6 +115,8 @@ async def test_portfolio_realized_sells_reset_after_full_close(client: httpx.Asy
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
     bond_id = bond["id"]
+    # TransactionCreate requires a broker_account_id owned by the caller.
+    account = await _create_account_for_user(client, headers)
     trades: list[tuple[str, int, float, str]] = [
         ("BUY", 10, 100.0, "2026-01-10"),
         ("SELL", 10, 120.0, "2026-01-15"),
@@ -121,6 +128,7 @@ async def test_portfolio_realized_sells_reset_after_full_close(client: httpx.Asy
             "/api/transactions",
             json={
                 "bond_id": bond_id,
+                "broker_account_id": account["id"],
                 "type": type_,
                 "quantity": quantity,
                 "price": price,

@@ -17,6 +17,12 @@ class Topic:
     BOND_CREATED = "bond.created"
     BOND_UPDATED = "bond.updated"
     BOND_DELETED = "bond.deleted"
+    BROKER_CREATED = "broker.created"
+    BROKER_UPDATED = "broker.updated"
+    BROKER_DELETED = "broker.deleted"
+    BROKER_ACCOUNT_CREATED = "broker_account.created"
+    BROKER_ACCOUNT_UPDATED = "broker_account.updated"
+    BROKER_ACCOUNT_DELETED = "broker_account.deleted"
     TRANSACTION_CREATED = "transaction.created"
     POSITION_UPDATED = "position.updated"
     PORTFOLIO_RECALCULATED = "portfolio.recalculated"
@@ -29,6 +35,12 @@ ALL_TOPICS: frozenset[str] = frozenset(
         Topic.BOND_CREATED,
         Topic.BOND_UPDATED,
         Topic.BOND_DELETED,
+        Topic.BROKER_CREATED,
+        Topic.BROKER_UPDATED,
+        Topic.BROKER_DELETED,
+        Topic.BROKER_ACCOUNT_CREATED,
+        Topic.BROKER_ACCOUNT_UPDATED,
+        Topic.BROKER_ACCOUNT_DELETED,
         Topic.TRANSACTION_CREATED,
         Topic.POSITION_UPDATED,
         Topic.PORTFOLIO_RECALCULATED,

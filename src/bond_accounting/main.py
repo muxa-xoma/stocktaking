@@ -7,8 +7,8 @@ This is the single place where all modules of the application are assembled:
 2. Create the async engine and session factory, then apply Alembic
    migrations (``upgrade head``).
 3. Start the in-process event bus.
-4. Build the services (auth, bonds, portfolio, analytics) and subscribe the
-   analytics service to the bus.
+4. Build the services (auth, bonds, brokers, portfolio, analytics) and
+   subscribe the analytics service to the bus.
 5. Register the NiceGUI pages and mount the REST API.
 6. Serve UI and REST on a single port; stop gracefully on SIGINT/SIGTERM.
 
@@ -57,6 +57,7 @@ from bond_accounting.analytics import AnalyticsService, attach_to_event_bus
 from bond_accounting.api import api_router, build_api_dependencies, register_exception_handlers
 from bond_accounting.auth import AuthService, JwtService, PasswordHasher
 from bond_accounting.bonds.service import BondService
+from bond_accounting.brokers.service import BrokerService
 from bond_accounting.config.logging_setup import setup_logging
 from bond_accounting.config.settings import load_settings, warn_if_weak_jwt_secret
 from bond_accounting.db import create_engine_from_settings, create_session_factory
@@ -149,18 +150,25 @@ async def main(config_path: str | None = None) -> None:
             jwt_service = JwtService(settings.auth)
             auth_service = AuthService(session_factory, password_hasher, jwt_service)
             bond_service = BondService(session_factory, event_bus)
+            broker_service = BrokerService(session_factory, event_bus)
             portfolio_service = PortfolioService(session_factory, event_bus)
             analytics_service = AnalyticsService(session_factory, event_bus)
             attach_to_event_bus(analytics_service, event_bus)
 
             create_ui_app(
-                auth_service, jwt_service, bond_service, portfolio_service, analytics_service
+                auth_service,
+                jwt_service,
+                bond_service,
+                broker_service,
+                portfolio_service,
+                analytics_service,
             )
 
             api_dependencies = build_api_dependencies(
                 auth_service,
                 jwt_service,
                 bond_service,
+                broker_service,
                 portfolio_service,
                 analytics_service,
             )

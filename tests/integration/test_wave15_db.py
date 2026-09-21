@@ -13,6 +13,7 @@ pragma validation. No REST, no UI.
 from __future__ import annotations
 
 import datetime
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,7 @@ from bond_accounting.bonds import BondCreate, BondService, BondUpdate
 from bond_accounting.bonds.service import BondNotOwnedError
 from bond_accounting.config.settings import DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
-from bond_accounting.db.models import Bond, Transaction, User
+from bond_accounting.db.models import Bond, Broker, BrokerAccount, Transaction, User
 from bond_accounting.event_bus import AsyncQueueEventBus
 from bond_accounting.portfolio import InsufficientPositionError, PortfolioService, TransactionCreate
 
@@ -114,6 +115,23 @@ async def _seed_user(session_factory: async_sessionmaker[AsyncSession], username
         return user.id
 
 
+async def _seed_account(session_factory: async_sessionmaker[AsyncSession], user_id: int) -> int:
+    """Insert a broker and an account for ``user_id``; return the account id.
+
+    ``TransactionCreate`` requires a ``broker_account_id`` owned by the user.
+    """
+    async with session_factory() as session:
+        broker = Broker(name=f"broker-{user_id}-{uuid.uuid4().hex[:8]}", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        account = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        session.add(account)
+        await session.commit()
+        return account.id
+
+
 # =========================================================================== #
 # 1. Bond ownership service guard (Task 24)
 # =========================================================================== #
@@ -156,6 +174,7 @@ async def test_sell_exact_position_succeeds_and_oversell_rejected(
     """SELL of exactly the held quantity succeeds; an oversell is rejected
     atomically (the position is left untouched)."""
     user_id = await _seed_user(session_factory, "sell-guard")
+    account_id = await _seed_account(session_factory, user_id)
     async with session_factory() as session:
         bond = Bond(
             isin="RU000A0JX2J8",
@@ -173,6 +192,7 @@ async def test_sell_exact_position_succeeds_and_oversell_rejected(
     def txn(type_: TransactionType, quantity: int, day: int) -> TransactionCreate:
         return TransactionCreate(
             bond_id=bond_id,
+            broker_account_id=account_id,
             type=type_,
             quantity=quantity,
             price=1000.0,
@@ -269,9 +289,18 @@ async def test_update_with_stopped_bus_rolls_back(migrated_db_url: str) -> None:
         created = await service.create(_wave15_bond("RU000A0JY0S6"), user_id=owner_id)
         # Make the owner a holder so the update actually publishes.
         async with service._session_factory() as session:
+            broker = Broker(name=f"rollback-broker-{uuid.uuid4().hex[:8]}", commission=0.3)
+            session.add(broker)
+            await session.flush()
+            account = BrokerAccount(
+                user_id=owner_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+            )
+            session.add(account)
+            await session.flush()
             txn = Transaction(
                 user_id=owner_id,
                 bond_id=created.id,
+                broker_account_id=account.id,
                 type="BUY",
                 quantity=1,
                 price=1000.0,
@@ -343,6 +372,9 @@ async def test_avg_buy_price_open_position_only(
         scenario: await _seed_user(session_factory, f"avg-{scenario}")
         for scenario in ("running", "flat", "reset")
     }
+    accounts = {
+        scenario: await _seed_account(session_factory, user) for scenario, user in users.items()
+    }
     async with session_factory() as session:
         bond = Bond(
             isin="RU000A0JY3V9",
@@ -357,9 +389,12 @@ async def test_avg_buy_price_open_position_only(
         await session.commit()
         bond_id = bond.id
 
-    def txn(type_: TransactionType, quantity: int, price: float, day: int) -> TransactionCreate:
+    def txn(
+        type_: TransactionType, quantity: int, price: float, day: int, scenario: str
+    ) -> TransactionCreate:
         return TransactionCreate(
             bond_id=bond_id,
+            broker_account_id=accounts[scenario],
             type=type_,
             quantity=quantity,
             price=price,
@@ -368,9 +403,9 @@ async def test_avg_buy_price_open_position_only(
 
     # Scenario 1: running average across a partial close.
     uid = users["running"]
-    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1))
-    await portfolio_service.add_transaction(uid, txn("SELL", 5, 150.0, 10))
-    await portfolio_service.add_transaction(uid, txn("BUY", 5, 110.0, 20))
+    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1, "running"))
+    await portfolio_service.add_transaction(uid, txn("SELL", 5, 150.0, 10, "running"))
+    await portfolio_service.add_transaction(uid, txn("BUY", 5, 110.0, 20, "running"))
     summary = await analytics_service.get_portfolio_summary(uid, today=today)
     assert len(summary.positions) == 1
     assert summary.positions[0].quantity == 10
@@ -379,17 +414,17 @@ async def test_avg_buy_price_open_position_only(
 
     # Scenario 2: flat position -> no open position at all.
     uid = users["flat"]
-    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1))
-    await portfolio_service.add_transaction(uid, txn("SELL", 10, 105.0, 10))
+    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1, "flat"))
+    await portfolio_service.add_transaction(uid, txn("SELL", 10, 105.0, 10, "flat"))
     summary = await analytics_service.get_portfolio_summary(uid, today=today)
     assert summary.positions == []
     assert summary.total_invested == 0.0
 
     # Scenario 3: average resets after a full close.
     uid = users["reset"]
-    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1))
-    await portfolio_service.add_transaction(uid, txn("SELL", 10, 105.0, 10))
-    await portfolio_service.add_transaction(uid, txn("BUY", 5, 200.0, 20))
+    await portfolio_service.add_transaction(uid, txn("BUY", 10, 100.0, 1, "reset"))
+    await portfolio_service.add_transaction(uid, txn("SELL", 10, 105.0, 10, "reset"))
+    await portfolio_service.add_transaction(uid, txn("BUY", 5, 200.0, 20, "reset"))
     summary = await analytics_service.get_portfolio_summary(uid, today=today)
     assert len(summary.positions) == 1
     assert summary.positions[0].quantity == 5

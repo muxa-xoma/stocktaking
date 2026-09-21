@@ -22,7 +22,7 @@ async def test_home_page_renders_empty(
 
     [table] = tables(ui_user)
     assert table.rows == []
-    portfolio_service.get_all_positions.assert_awaited_once_with(1)
+    portfolio_service.get_all_positions.assert_awaited_once_with(1, broker_account_id=None)
 
 
 async def test_home_page_requires_authentication(ui_user) -> None:

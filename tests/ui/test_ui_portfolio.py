@@ -41,7 +41,7 @@ async def test_portfolio_table_populated(
         }
     ]
     bond_service.list_all.assert_awaited_with()
-    portfolio_service.get_all_positions.assert_awaited_with(1)
+    portfolio_service.get_all_positions.assert_awaited_with(1, broker_account_id=None)
 
 
 async def test_portfolio_skips_position_with_missing_bond(

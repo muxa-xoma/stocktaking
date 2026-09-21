@@ -31,7 +31,12 @@ async def test_analytics_page_renders_summary(ui_user, valid_token, analytics_se
     await ui_user.should_see("итого: 145.00")
     await ui_user.should_see("Сформировано: 01.02.2026 10:30")
     analytics_service.get_portfolio_summary.assert_awaited_once_with(
-        1, horizon_days=730, limit=100, cashflows_horizon_days=3650, cashflows_limit=500
+        1,
+        horizon_days=730,
+        limit=100,
+        cashflows_horizon_days=3650,
+        cashflows_limit=500,
+        broker_account_id=None,
     )
 
 

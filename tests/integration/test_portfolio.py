@@ -16,10 +16,11 @@ from sqlalchemy import select
 
 from bond_accounting.config.settings import DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
-from bond_accounting.db.models import Bond, Transaction, User
+from bond_accounting.db.models import Bond, Broker, BrokerAccount, Transaction, User
 from bond_accounting.event_bus import AsyncQueueEventBus, Topic
 from bond_accounting.portfolio import (
     InsufficientPositionError,
+    InvalidTransactionError,
     PortfolioService,
     TransactionCreate,
 )
@@ -39,13 +40,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 #: How long to wait for async event delivery before failing a test.
 _EVENT_TIMEOUT = 2.0
 
+#: Broker account used by ``_txn`` when none is passed explicitly. Set by the
+#: ``broker_account_ids`` fixture; tests using ``_txn`` must depend on it.
+_default_account_id: int | None = None
+
 
 def _txn(
-    bond_id: int, type_: TransactionType, quantity: int, price: float, day: int
+    bond_id: int,
+    type_: TransactionType,
+    quantity: int,
+    price: float,
+    day: int,
+    account_id: int | None = None,
 ) -> TransactionCreate:
-    """Build a TransactionCreate dated 2026-01-<day>."""
+    """Build a TransactionCreate dated 2026-01-<day>.
+
+    ``account_id`` defaults to the first fixture account (see
+    ``broker_account_ids``); filtering tests pass an explicit account.
+    """
+    resolved = account_id if account_id is not None else _default_account_id
+    if resolved is None:
+        raise RuntimeError("no broker_account_id: depend on the broker_account_ids fixture")
     return TransactionCreate(
         bond_id=bond_id,
+        broker_account_id=resolved,
         type=type_,
         quantity=quantity,
         price=price,
@@ -146,6 +164,39 @@ async def _add_second_bond(session_factory: async_sessionmaker[AsyncSession], ow
         session.add(bond)
         await session.commit()
         return bond.id
+
+
+@pytest.fixture(autouse=True)
+async def broker_account_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+) -> AsyncGenerator[tuple[int, int]]:
+    """Two broker accounts of the test user; also sets the ``_txn`` default.
+
+    Autouse: ``TransactionCreate`` requires a ``broker_account_id`` owned by
+    the user, so every transaction built by ``_txn`` needs one. The first
+    account becomes the implicit default (existing call sites unchanged);
+    filtering tests pass the second account explicitly.
+    """
+    global _default_account_id
+    user_id, _ = user_and_bond_ids
+    async with session_factory() as session:
+        broker = Broker(name="Тестовый брокер", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        first = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        second = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Дополнительный", account_type="IIS"
+        )
+        session.add_all([first, second])
+        await session.commit()
+        _default_account_id = first.id
+        try:
+            yield first.id, second.id
+        finally:
+            _default_account_id = None
 
 
 def _collector(events: list[Message]) -> Callable[[Message], Awaitable[None]]:
@@ -512,3 +563,144 @@ async def test_get_position_value_matches_position_total_invested(
 
     assert value == pytest.approx(position.total_invested)
     assert position.quantity == 10
+
+
+# --------------------------------------------------------------------- #
+# broker_account_id integration
+
+
+async def test_add_transaction_with_broker_account(
+    service: PortfolioService,
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    """A transaction records the given broker_account_id (row and DTO)."""
+    user_id, bond_id = user_and_bond_ids
+    _first, second = broker_account_ids
+
+    dto = await service.add_transaction(
+        user_id, _txn(bond_id, "BUY", 3, 1000.0, 10, account_id=second)
+    )
+
+    assert dto.broker_account_id == second
+    async with session_factory() as session:
+        row = await session.get(Transaction, dto.id)
+        assert row is not None
+        assert row.broker_account_id == second
+
+
+async def test_add_transaction_wrong_account(
+    service: PortfolioService,
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    """A nonexistent or foreign broker_account_id is rejected."""
+    user_id, bond_id = user_and_bond_ids
+
+    with pytest.raises(InvalidTransactionError):
+        await service.add_transaction(
+            user_id, _txn(bond_id, "BUY", 1, 1000.0, 10, account_id=999_999)
+        )
+
+    # An account owned by another user is equally invalid.
+    async with session_factory() as session:
+        stranger = User(username="mallory", password_hash="not-a-real-hash")
+        session.add(stranger)
+        await session.flush()
+        broker = (await session.scalars(select(Broker))).first()
+        assert broker is not None
+        foreign = BrokerAccount(
+            user_id=stranger.id, broker_id=broker.id, name="Чужой", account_type="STANDARD"
+        )
+        session.add(foreign)
+        await session.commit()
+        foreign_id = foreign.id
+
+    with pytest.raises(InvalidTransactionError):
+        await service.add_transaction(
+            user_id, _txn(bond_id, "BUY", 1, 1000.0, 10, account_id=foreign_id)
+        )
+
+    async with session_factory() as session:
+        rows = (await session.scalars(select(Transaction))).all()
+        assert rows == []
+
+
+async def test_list_transactions_by_account(
+    service: PortfolioService,
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    user_id, bond_id = user_and_bond_ids
+    first, second = broker_account_ids
+
+    await service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+    await service.add_transaction(user_id, _txn(bond_id, "BUY", 4, 1010.0, 11, account_id=second))
+
+    only_first = await service.list_transactions(user_id, broker_account_id=first)
+    assert [t.id for t in only_first] == [1]
+
+    only_second = await service.list_transactions(user_id, broker_account_id=second)
+    assert [t.id for t in only_second] == [2]
+
+    everything = await service.list_transactions(user_id)
+    assert len(everything) == 2
+
+
+async def test_get_position_by_account(
+    service: PortfolioService,
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    """Positions are computed per account; SELL/MATURE guards are per account."""
+    user_id, bond_id = user_and_bond_ids
+    first, second = broker_account_ids
+
+    await service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+    await service.add_transaction(user_id, _txn(bond_id, "BUY", 5, 1100.0, 11, account_id=second))
+
+    first_position = await service.get_position(user_id, bond_id, broker_account_id=first)
+    assert first_position.quantity == 10
+    assert first_position.avg_buy_price == pytest.approx(1000.0)
+
+    second_position = await service.get_position(user_id, bond_id, broker_account_id=second)
+    assert second_position.quantity == 5
+    assert second_position.avg_buy_price == pytest.approx(1100.0)
+
+    # The position check is scoped to the account: the second account holds
+    # only 5, so selling 6 on it is rejected even though the combined
+    # position is 15.
+    with pytest.raises(InsufficientPositionError):
+        await service.add_transaction(
+            user_id, _txn(bond_id, "SELL", 6, 1050.0, 20, account_id=second)
+        )
+
+
+async def test_get_all_positions_by_account(
+    service: PortfolioService,
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    user_id, bond_id = user_and_bond_ids
+    first, second = broker_account_ids
+    other_bond_id = await _add_second_bond(session_factory, user_id)
+
+    await service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+    await service.add_transaction(
+        user_id, _txn(other_bond_id, "BUY", 5, 900.0, 12, account_id=second)
+    )
+
+    first_positions = await service.get_all_positions(user_id, broker_account_id=first)
+    assert [p.bond_id for p in first_positions] == [bond_id]
+    assert first_positions[0].quantity == 10
+
+    second_positions = await service.get_all_positions(user_id, broker_account_id=second)
+    assert [p.bond_id for p in second_positions] == [other_bond_id]
+    assert second_positions[0].quantity == 5
+
+    # Without the filter both bonds show up.
+    all_positions = await service.get_all_positions(user_id)
+    assert {p.bond_id for p in all_positions} == {bond_id, other_bond_id}

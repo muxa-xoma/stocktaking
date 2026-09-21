@@ -23,6 +23,7 @@ from bond_accounting.analytics.dto import (
     RealizedPnl,
 )
 from bond_accounting.bonds.dto import BondDTO
+from bond_accounting.brokers.dto import BrokerAccountDTO
 from bond_accounting.portfolio.dto import PositionDTO, TransactionDTO
 
 if TYPE_CHECKING:
@@ -68,7 +69,8 @@ def one(
     """Единственный элемент, соответствующий фильтру (иначе — ошибка теста)."""
     found = elements(user, kind=kind, content=content, within=within)
     assert len(found) == 1, (
-        f"expected exactly one element (kind={kind}, content={content!r}, within={within}), found {len(found)}: {found}"
+        f"expected exactly one element (kind={kind}, content={content!r}, "
+        f"within={within}), found {len(found)}: {found}"
     )
     return found[0]
 
@@ -168,11 +170,12 @@ def make_position(**overrides: Any) -> PositionDTO:
 
 
 def make_transaction(**overrides: Any) -> TransactionDTO:
-    """Сделка по умолчанию: покупка 10 штук 10.01.2026."""
+    """Сделка по умолчанию: покупка 10 штук 10.01.2026 на счёте №1."""
     defaults: dict[str, Any] = {
         "id": 1,
         "user_id": 1,
         "bond_id": 1,
+        "broker_account_id": 1,
         "type": "BUY",
         "quantity": 10,
         "price": 980.5,
@@ -181,6 +184,23 @@ def make_transaction(**overrides: Any) -> TransactionDTO:
         "created_at": datetime(2026, 1, 10, 12, 0),
     }
     return TransactionDTO(**{**defaults, **overrides})
+
+
+def make_account(**overrides: Any) -> BrokerAccountDTO:
+    """Брокерский счёт по умолчанию: счёт №1 пользователя №1 у «Test Broker»."""
+    defaults: dict[str, Any] = {
+        "id": 1,
+        "user_id": 1,
+        "broker_id": 1,
+        "broker_name": "Test Broker",
+        "name": "Основной",
+        "account_number": "AB-001",
+        "account_type": "STANDARD",
+        "opened_at": None,
+        "closed_at": None,
+        "created_at": datetime(2026, 1, 1, 0, 0),
+    }
+    return BrokerAccountDTO(**{**defaults, **overrides})
 
 
 def make_summary(**overrides: Any) -> PortfolioSummary:

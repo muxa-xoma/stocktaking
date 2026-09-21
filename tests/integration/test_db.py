@@ -26,6 +26,7 @@ from bond_accounting.db import (
     create_engine_from_settings,
     create_session_factory,
 )
+from bond_accounting.db.models import Broker, BrokerAccount
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -46,11 +47,31 @@ EXPECTED_COLUMNS = {
         "id",
         "user_id",
         "bond_id",
+        "broker_account_id",
         "type",
         "quantity",
         "price",
         "date",
         "commission",
+        "created_at",
+    },
+    "brokers": {
+        "id",
+        "name",
+        "commission",
+        "min_commission",
+        "description",
+        "created_at",
+    },
+    "broker_accounts": {
+        "id",
+        "user_id",
+        "broker_id",
+        "name",
+        "account_number",
+        "account_type",
+        "opened_at",
+        "closed_at",
         "created_at",
     },
 }
@@ -98,7 +119,13 @@ def migrated_db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def test_models_registered_on_metadata() -> None:
     """All model tables and columns are present on the shared metadata."""
-    assert set(Base.metadata.tables) >= {"users", "bonds", "transactions"}
+    assert set(Base.metadata.tables) >= {
+        "users",
+        "bonds",
+        "transactions",
+        "brokers",
+        "broker_accounts",
+    }
     for table, columns in EXPECTED_COLUMNS.items():
         assert set(Base.metadata.tables[table].columns.keys()) == columns, table
 
@@ -109,11 +136,11 @@ def test_alembic_upgrade_and_downgrade(tmp_path: Path) -> None:
 
     _run_alembic(db_path, "upgrade", "head")
     tables = _sqlite_tables(db_path)
-    assert {"users", "bonds", "transactions"} <= tables
+    assert {"users", "bonds", "transactions", "brokers", "broker_accounts"} <= tables
 
     _run_alembic(db_path, "downgrade", "base")
     tables = _sqlite_tables(db_path)
-    assert not ({"users", "bonds", "transactions"} & tables)
+    assert not ({"users", "bonds", "transactions", "brokers", "broker_accounts"} & tables)
 
 
 async def test_sqlite_pragmas_applied_by_listener(tmp_path: Path) -> None:
@@ -152,12 +179,21 @@ async def test_insert_and_position_computation(migrated_db_path: Path) -> None:
                     maturity_date=datetime.date(2030, 1, 1),
                     owner_id=user.id,
                 )
+                broker = Broker(name="position-broker", commission=0.3)
+                session.add(broker)
+                await session.flush()
+                account = BrokerAccount(
+                    user_id=user.id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+                )
+                session.add(account)
+                await session.flush()
                 session.add_all(
                     [
                         bond,
                         Transaction(
                             user=user,
                             bond=bond,
+                            broker_account_id=account.id,
                             type="BUY",
                             quantity=10,
                             price=99.5,
@@ -166,6 +202,7 @@ async def test_insert_and_position_computation(migrated_db_path: Path) -> None:
                         Transaction(
                             user=user,
                             bond=bond,
+                            broker_account_id=account.id,
                             type="MATURE",
                             quantity=4,
                             price=100.0,
@@ -220,11 +257,20 @@ async def test_transaction_type_check_constraint(migrated_db_path: Path) -> None
             )
             session.add(bond)
             await session.flush()
+            broker = Broker(name="check-broker", commission=0.3)
+            session.add(broker)
+            await session.flush()
+            account = BrokerAccount(
+                user_id=user.id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+            )
+            session.add(account)
+            await session.flush()
 
             session.add(
                 Transaction(
                     user_id=user.id,
                     bond_id=bond.id,
+                    broker_account_id=account.id,
                     type="INVALID",
                     quantity=1,
                     price=100.0,

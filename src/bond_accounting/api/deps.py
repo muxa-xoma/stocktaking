@@ -24,6 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from bond_accounting.analytics.service import AnalyticsService  # noqa: TC001
 from bond_accounting.auth import AuthService, JwtError, JwtService
 from bond_accounting.bonds.service import BondService  # noqa: TC001
+from bond_accounting.brokers.service import BrokerService  # noqa: TC001
 from bond_accounting.portfolio.service import PortfolioService  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -73,6 +74,20 @@ def get_bond_service() -> BondService:
     """
     raise RuntimeError(
         "BondService is not configured; install ApiDependencies.overrides() "
+        "on the application via app.dependency_overrides"
+    )
+
+
+def get_broker_service() -> BrokerService:
+    """Return the :class:`BrokerService` bound by the application.
+
+    Raises:
+        RuntimeError: Always, unless the application installed the providers
+            from :meth:`ApiDependencies.overrides` via
+            ``app.dependency_overrides``.
+    """
+    raise RuntimeError(
+        "BrokerService is not configured; install ApiDependencies.overrides() "
         "on the application via app.dependency_overrides"
     )
 
@@ -141,6 +156,8 @@ class ApiDependencies:
         get_auth_service: Provider returning the application's AuthService.
         get_jwt_service: Provider returning the application's JwtService.
         get_bond_service: Provider returning the application's BondService.
+        get_broker_service: Provider returning the application's
+            BrokerService.
         get_portfolio_service: Provider returning the application's
             PortfolioService.
         get_analytics_service: Provider returning the application's
@@ -150,6 +167,7 @@ class ApiDependencies:
     get_auth_service: Callable[[], AuthService]
     get_jwt_service: Callable[[], JwtService]
     get_bond_service: Callable[[], BondService]
+    get_broker_service: Callable[[], BrokerService]
     get_portfolio_service: Callable[[], PortfolioService]
     get_analytics_service: Callable[[], AnalyticsService]
 
@@ -163,6 +181,7 @@ class ApiDependencies:
             get_auth_service: self.get_auth_service,
             get_jwt_service: self.get_jwt_service,
             get_bond_service: self.get_bond_service,
+            get_broker_service: self.get_broker_service,
             get_portfolio_service: self.get_portfolio_service,
             get_analytics_service: self.get_analytics_service,
         }
@@ -172,6 +191,7 @@ def build_api_dependencies(
     auth_service: AuthService,
     jwt_service: JwtService,
     bond_service: BondService,
+    broker_service: BrokerService,
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
 ) -> ApiDependencies:
@@ -181,6 +201,7 @@ def build_api_dependencies(
         auth_service: Authentication service (register/login).
         jwt_service: JWT creator/verifier used for bearer-token checks.
         bond_service: Bond CRUD service.
+        broker_service: Broker and broker-account CRUD service.
         portfolio_service: Transaction and position service.
         analytics_service: Portfolio analytics service.
 
@@ -199,6 +220,9 @@ def build_api_dependencies(
     def _bond_service() -> BondService:
         return bond_service
 
+    def _broker_service() -> BrokerService:
+        return broker_service
+
     def _portfolio_service() -> PortfolioService:
         return portfolio_service
 
@@ -209,6 +233,7 @@ def build_api_dependencies(
         get_auth_service=_auth_service,
         get_jwt_service=_jwt_service,
         get_bond_service=_bond_service,
+        get_broker_service=_broker_service,
         get_portfolio_service=_portfolio_service,
         get_analytics_service=_analytics_service,
     )

@@ -434,6 +434,7 @@ class AnalyticsService:
         limit: int = NEXT_COUPONS_LIMIT_DEFAULT,
         cashflows_horizon_days: int = CASHFLOWS_HORIZON_DAYS_DEFAULT,
         cashflows_limit: int = CASHFLOWS_LIMIT_DEFAULT,
+        broker_account_id: int | None = None,
     ) -> PortfolioSummary:
         """Return the user's portfolio summary; only open positions.
 
@@ -482,6 +483,9 @@ class AnalyticsService:
                 from the valuation date; ``1..7300``, default 3650.
             cashflows_limit: Maximum number of ``upcoming_cashflows``
                 events; ``1..5000``, default 500.
+            broker_account_id: When given, restrict the summary to
+                transactions on this broker account and bypass the cache
+                (the cache stores only the all-accounts summary).
 
         Returns:
             The portfolio summary — from cache, or computed on a miss;
@@ -502,7 +506,8 @@ class AnalyticsService:
             )
         if not NEXT_COUPONS_LIMIT_MIN <= limit <= NEXT_COUPONS_LIMIT_MAX:
             raise ValueError(
-                f"next_coupons limit must be {NEXT_COUPONS_LIMIT_MIN}..{NEXT_COUPONS_LIMIT_MAX}, got {limit}"
+                f"next_coupons limit must be {NEXT_COUPONS_LIMIT_MIN}..{NEXT_COUPONS_LIMIT_MAX}, "
+                f"got {limit}"
             )
         if not CASHFLOWS_HORIZON_DAYS_MIN <= cashflows_horizon_days <= CASHFLOWS_HORIZON_DAYS_MAX:
             raise ValueError(
@@ -512,10 +517,18 @@ class AnalyticsService:
             )
         if not CASHFLOWS_LIMIT_MIN <= cashflows_limit <= CASHFLOWS_LIMIT_MAX:
             raise ValueError(
-                f"upcoming_cashflows limit must be {CASHFLOWS_LIMIT_MIN}..{CASHFLOWS_LIMIT_MAX}, got {cashflows_limit}"
+                f"upcoming_cashflows limit must be {CASHFLOWS_LIMIT_MIN}..{CASHFLOWS_LIMIT_MAX}, "
+                f"got {cashflows_limit}"
             )
 
-        if today is not None:
+        if broker_account_id is not None:
+            # Per-account summaries are computed on the fly; the cache
+            # stores only the all-accounts summary (key ("summary", user_id)).
+            base = today if today is not None else date.today()
+            summary = await self._compute_summary(
+                user_id, base, broker_account_id=broker_account_id
+            )
+        elif today is not None:
             summary = await self._compute_summary(user_id, today)
             base = today
         else:
@@ -541,7 +554,11 @@ class AnalyticsService:
         return summary
 
     async def get_position_analytics(
-        self, user_id: int, bond_id: int, today: date | None = None
+        self,
+        user_id: int,
+        bond_id: int,
+        today: date | None = None,
+        broker_account_id: int | None = None,
     ) -> PositionAnalytics | None:
         """Analytics for a single position; no event is published.
 
@@ -556,13 +573,21 @@ class AnalyticsService:
             bond_id: Bond the position is held in.
             today: Valuation date; defaults to ``date.today()``. An
                 explicit value bypasses the cache.
+            broker_account_id: When given, restrict the computation to
+                transactions on this broker account and bypass the cache.
 
         Returns:
             Position analytics, or ``None`` when the user-bond pair has no
             transaction history, the bond does not exist, or the position
             is closed (``quantity <= 0``).
         """
-        if today is not None:
+        if broker_account_id is not None:
+            summary = await self._compute_summary(
+                user_id,
+                today if today is not None else date.today(),
+                broker_account_id=broker_account_id,
+            )
+        elif today is not None:
             summary = await self._compute_summary(user_id, today)
         else:
             summary = await self.get_portfolio_summary(user_id)
@@ -593,12 +618,16 @@ class AnalyticsService:
         )
         return summary.model_copy(deep=True)
 
-    async def _compute_summary(self, user_id: int, valuation_date: date) -> PortfolioSummary:
+    async def _compute_summary(
+        self, user_id: int, valuation_date: date, broker_account_id: int | None = None
+    ) -> PortfolioSummary:
         """Compute the full portfolio summary (no cache, no publish).
 
         Args:
             user_id: User whose portfolio is summarized.
             valuation_date: Valuation date for yields and coupon grids.
+            broker_account_id: When given, restrict the computation to
+                transactions on this broker account.
 
         Returns:
             The freshly computed portfolio summary — including empty
@@ -606,11 +635,10 @@ class AnalyticsService:
         """
 
         async with self._session_factory() as session:
-            txn_result = await session.execute(
-                select(Transaction)
-                .where(Transaction.user_id == user_id)
-                .order_by(Transaction.date, Transaction.id)
-            )
+            stmt = select(Transaction).where(Transaction.user_id == user_id)
+            if broker_account_id is not None:
+                stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
+            txn_result = await session.execute(stmt.order_by(Transaction.date, Transaction.id))
             txns = list(txn_result.scalars().all())
             bonds: dict[int, Bond] = {}
             if txns:

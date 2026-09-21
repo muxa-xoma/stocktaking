@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
@@ -21,20 +23,23 @@ from bond_accounting.analytics.dto import (
     NEXT_COUPONS_LIMIT_MAX,
     NEXT_COUPONS_LIMIT_MIN,
 )
+from bond_accounting.ui.base_page import BasePage
 from bond_accounting.ui.common import (
+    build_account_selector,
     fmt_date,
     fmt_datetime,
     fmt_money,
     fmt_percent,
-    get_current_user,
     notify_error,
     page_header,
+    resolve_account_id,
 )
 
 if TYPE_CHECKING:
     from bond_accounting.analytics.dto import PortfolioSummary
     from bond_accounting.analytics.service import AnalyticsService
-    from bond_accounting.auth.jwt_service import JwtService
+    from bond_accounting.auth.jwt_service import JwtService, TokenPayload
+    from bond_accounting.brokers.service import BrokerService
 
 logger = logging.getLogger(__name__)
 
@@ -133,51 +138,74 @@ def _cashflow_rows(summary: PortfolioSummary) -> list[dict[str, Any]]:
     ]
 
 
-def register_analytics_pages(jwt_service: JwtService, analytics_service: AnalyticsService) -> None:
-    """Зарегистрировать страницу ``/analytics`` со сводкой портфеля.
+@dataclass
+class _AnalyticsState:
+    """Мутируемое состояние страницы: идентификатор пользователя, фильтры и виджеты."""
 
-    Args:
-        jwt_service: Сервис проверки JWT из cookie.
-        analytics_service: Сервис расчёта аналитики портфеля.
-    """
+    user_id: int
+    account_select: ui.select
+    horizon_input: ui.number
+    limit_input: ui.number
+    cashflows_horizon_input: ui.number
+    cashflows_limit_input: ui.number
+    total_label: ui.label
+    pnl_label: ui.label
+    generated_label: ui.label
+    positions_table: ui.table
+    coupons_table: ui.table
+    cashflows_table: ui.table
 
-    @ui.page("/analytics")
-    async def analytics_page() -> None:
-        """Сводка портфеля: итоги, реализованный результат, купоны, потоки."""
-        user = get_current_user(jwt_service)
-        if user is None:
-            return
 
-        async def reload() -> None:
-            """Пересчитать сводку и обновить все элементы страницы."""
-            try:
-                summary = await analytics_service.get_portfolio_summary(
-                    user.user_id,
-                    horizon_days=_int_value(horizon_input, NEXT_COUPONS_HORIZON_DAYS_DEFAULT),
-                    limit=_int_value(limit_input, NEXT_COUPONS_LIMIT_DEFAULT),
-                    cashflows_horizon_days=_int_value(
-                        cashflows_horizon_input, CASHFLOWS_HORIZON_DAYS_DEFAULT
-                    ),
-                    cashflows_limit=_int_value(cashflows_limit_input, CASHFLOWS_LIMIT_DEFAULT),
-                )
-            except Exception as exc:
-                notify_error(exc)
-                return
-            total_label.set_text(f"Всего вложено: {fmt_money(summary.total_invested)}")
-            pnl_label.set_text(
-                f"Реализованный результат — продажи: {fmt_money(summary.realized_pnl.sells)}, "
-                f"погашения: {fmt_money(summary.realized_pnl.maturities)}, "
-                f"комиссии: {fmt_money(summary.realized_pnl.commissions)}, "
-                f"итого: {fmt_money(summary.realized_pnl.total)}"
+class AnalyticsPage(BasePage):
+    """Страница аналитики (``/analytics``)."""
+
+    path = "/analytics"
+
+    def __init__(
+        self,
+        jwt_service: JwtService,
+        analytics_service: AnalyticsService,
+        broker_service: BrokerService,
+    ) -> None:
+        super().__init__(jwt_service)
+        self.analytics_service = analytics_service
+        self.broker_service = broker_service
+
+    async def _reload(self, state: _AnalyticsState) -> None:
+        """Пересчитать сводку и обновить все элементы страницы."""
+        account_id = resolve_account_id(state.account_select.value)
+        try:
+            summary = await self.analytics_service.get_portfolio_summary(
+                state.user_id,
+                horizon_days=_int_value(state.horizon_input, NEXT_COUPONS_HORIZON_DAYS_DEFAULT),
+                limit=_int_value(state.limit_input, NEXT_COUPONS_LIMIT_DEFAULT),
+                cashflows_horizon_days=_int_value(
+                    state.cashflows_horizon_input, CASHFLOWS_HORIZON_DAYS_DEFAULT
+                ),
+                cashflows_limit=_int_value(state.cashflows_limit_input, CASHFLOWS_LIMIT_DEFAULT),
+                broker_account_id=account_id,
             )
-            generated_label.set_text(f"Сформировано: {fmt_datetime(summary.generated_at)}")
-            positions_table.rows = _summary_rows(summary)
-            coupons_table.rows = _coupon_rows(summary)
-            cashflows_table.rows = _cashflow_rows(summary)
+        except Exception as exc:
+            notify_error(exc)
+            return
+        state.total_label.set_text(f"Всего вложено: {fmt_money(summary.total_invested)}")
+        state.pnl_label.set_text(
+            f"Реализованный результат — продажи: {fmt_money(summary.realized_pnl.sells)}, "
+            f"погашения: {fmt_money(summary.realized_pnl.maturities)}, "
+            f"комиссии: {fmt_money(summary.realized_pnl.commissions)}, "
+            f"итого: {fmt_money(summary.realized_pnl.total)}"
+        )
+        state.generated_label.set_text(f"Сформировано: {fmt_datetime(summary.generated_at)}")
+        state.positions_table.rows = _summary_rows(summary)
+        state.coupons_table.rows = _coupon_rows(summary)
+        state.cashflows_table.rows = _cashflow_rows(summary)
 
+    async def render(self, user: TokenPayload) -> None:
+        """Сводка портфеля: итоги, реализованный результат, купоны, потоки."""
         page_header("/analytics")
         with ui.column().classes("w-full max-w-6xl mx-auto gap-6"):
             ui.label("Аналитика портфеля").classes("text-h5")
+            account_select = await build_account_selector(self.broker_service, user.user_id)
             with ui.row().classes("items-end"):
                 horizon_input = ui.number(
                     "Горизонт купонов, дней",
@@ -207,7 +235,7 @@ def register_analytics_pages(jwt_service: JwtService, analytics_service: Analyti
                     max=CASHFLOWS_LIMIT_MAX,
                     step=1,
                 )
-                ui.button("Обновить", icon="refresh", on_click=reload)
+                refresh_button = ui.button("Обновить", icon="refresh")
 
             with ui.card().classes("w-full"):
                 ui.label("Сводка").classes("text-subtitle1")
@@ -229,4 +257,20 @@ def register_analytics_pages(jwt_service: JwtService, analytics_service: Analyti
                 ui.label("Будущие денежные потоки").classes("text-subtitle1")
                 cashflows_table = ui.table(columns=_CASHFLOW_COLUMNS, rows=[]).classes("w-full")
 
-        await reload()
+        state = _AnalyticsState(
+            user_id=user.user_id,
+            account_select=account_select,
+            horizon_input=horizon_input,
+            limit_input=limit_input,
+            cashflows_horizon_input=cashflows_horizon_input,
+            cashflows_limit_input=cashflows_limit_input,
+            total_label=total_label,
+            pnl_label=pnl_label,
+            generated_label=generated_label,
+            positions_table=positions_table,
+            coupons_table=coupons_table,
+            cashflows_table=cashflows_table,
+        )
+        account_select.on_value_change(partial(self._reload, state))
+        refresh_button.on_click(partial(self._reload, state))
+        await self._reload(state)

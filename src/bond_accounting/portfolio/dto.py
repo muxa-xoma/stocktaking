@@ -39,6 +39,8 @@ class TransactionCreate(BaseModel):
 
     Attributes:
         bond_id: Target bond.
+        broker_account_id: Broker account the transaction is executed on;
+            must be a positive identifier.
         type: Operation kind; one of ``BUY``, ``SELL``, ``MATURE``.
         quantity: Number of bond units; must be strictly positive.
         price: Price per unit; must be strictly positive.
@@ -47,6 +49,10 @@ class TransactionCreate(BaseModel):
     """
 
     bond_id: int
+    broker_account_id: int = Field(
+        gt=0,
+        description="Broker account the transaction is executed on.",
+    )
     type: TransactionType
     quantity: int = Field(gt=0, description="Number of bond units; must be positive.")
     price: float = Field(gt=0, description="Price per unit; must be positive.")
@@ -61,6 +67,7 @@ class TransactionDTO(BaseModel):
         id: Database identifier.
         user_id: Owning user.
         bond_id: Target bond.
+        broker_account_id: Broker account the transaction was executed on.
         type: Operation kind (``BUY`` / ``SELL`` / ``MATURE``).
         quantity: Number of bond units.
         price: Price per unit.
@@ -72,6 +79,7 @@ class TransactionDTO(BaseModel):
     id: int
     user_id: int
     bond_id: int
+    broker_account_id: int
     type: str
     quantity: int
     price: float
@@ -95,6 +103,7 @@ class TransactionDTO(BaseModel):
             id=obj.id,
             user_id=obj.user_id,
             bond_id=obj.bond_id,
+            broker_account_id=obj.broker_account_id,
             type=obj.type,
             quantity=obj.quantity,
             price=obj.price,

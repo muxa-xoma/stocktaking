@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from functools import partial
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from nicegui import ui
-from pydantic import ValidationError
 
 from bond_accounting.bonds.dto import BondCreate, BondUpdate
-from bond_accounting.ui.common import (
-    fmt_date,
-    get_current_user,
-    notify_error,
-    page_header,
-    parse_date,
-)
+from bond_accounting.ui.base_page import BasePage
+from bond_accounting.ui.common import fmt_date, page_header, parse_date
+from bond_accounting.ui.crud_mixin import CrudPageMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from bond_accounting.auth.jwt_service import JwtService
+    from bond_accounting.auth.jwt_service import JwtService, TokenPayload
     from bond_accounting.bonds.service import BondService
 
 logger = logging.getLogger(__name__)
@@ -52,6 +49,38 @@ _ISIN_RULES: dict[str, Callable[[Any], bool]] = {
 }
 
 
+@dataclass
+class _BondsState:
+    """Локальное состояние страницы облигаций: виджеты, кэш и текущий выбор.
+
+    Создаётся в :meth:`BondsPage.render` в локальной области видимости и
+    передаётся первым аргументом в общие методы :class:`CrudPageMixin`
+    (поля ``cache``, ``selected_id``, ``table``, ``selected_label``,
+    ``delete_dialog`` — часть интерфейса миксина). Виджетные поля заполняются
+    по мере построения страницы в :meth:`render`.
+    """
+
+    owner_id: int
+    cache: dict[int, Any]
+    selected_id: int | None
+    table: Any = None
+    selected_label: Any = None
+    isin_input: Any = None
+    name_input: Any = None
+    nominal_input: Any = None
+    coupon_rate_input: Any = None
+    frequency_select: Any = None
+    maturity_input: Any = None
+    issuer_input: Any = None
+    edit_name: Any = None
+    edit_nominal: Any = None
+    edit_rate: Any = None
+    edit_frequency: Any = None
+    edit_maturity: Any = None
+    edit_issuer: Any = None
+    delete_dialog: Any = None
+
+
 def _is_valid_isin(value: str | None) -> bool:
     """Проверить форму ISIN: 12 символов из заглавных латинских букв и цифр."""
     return (
@@ -63,168 +92,131 @@ def _is_valid_isin(value: str | None) -> bool:
     )
 
 
-def register_bond_pages(jwt_service: JwtService, bond_service: BondService) -> None:
-    """Зарегистрировать страницу ``/bonds`` с полным CRUD по облигациям.
+class BondsPage(BasePage, CrudPageMixin):
+    """Страница справочника облигаций (``/bonds``).
 
-    Args:
-        jwt_service: Сервис проверки JWT из cookie.
-        bond_service: Сервис CRUD облигаций.
+    Именование сущностей выбрано в женском роде ед. числа; `BasePage` указан
+    первым в списке базовых классов, поэтому его ``render``/``register`` не
+    перекрываются методами миксина.
     """
 
-    @ui.page("/bonds")
-    async def bonds_page() -> None:
+    path = "/bonds"
+
+    #: Морфология сообщений CRUD (см. :class:`CrudPageMixin`).
+    entity_title: ClassVar[str] = "Облигация"
+    entity_accusative: ClassVar[str] = "облигацию"
+    entity_genitive: ClassVar[str] = "облигации"
+    selected_verb: ClassVar[str] = "Выбрана облигация:"
+    no_selection_text: ClassVar[str] = "Облигация не выбрана — отметьте строку в таблице"
+    name_required_message: ClassVar[str] = "Название обязательно"
+    created_suffix: ClassVar[str] = "добавлена"
+    updated_suffix: ClassVar[str] = "обновлена"
+    deleted_message: ClassVar[str] = "Облигация удалена"
+    not_found_message: ClassVar[str] = "Облигация не найдена"
+    delete_guard_error: ClassVar[type[Exception] | tuple[type[Exception], ...]] = ()
+
+    def __init__(self, jwt_service: JwtService, bond_service: BondService) -> None:
+        super().__init__(jwt_service)
+        self.bond_service = bond_service
+
+    # -- Хуки CRUD ----------------------------------------------------------
+
+    async def _load_rows(self, state: _BondsState) -> list[dict[str, Any]]:
+        """Загрузить облигации и обновить кэш для формы правки."""
+        bonds = await self.bond_service.list_all()
+        state.cache.clear()
+        state.cache.update({bond.id: bond for bond in bonds})
+        return [
+            {
+                "id": bond.id,
+                "isin": bond.isin,
+                "name": bond.name,
+                "nominal": bond.nominal,
+                "coupon_rate": bond.coupon_rate,
+                "coupon_frequency": _FREQUENCY_OPTIONS.get(
+                    bond.coupon_frequency, bond.coupon_frequency
+                ),
+                "maturity_date": fmt_date(bond.maturity_date),
+                "issuer": bond.issuer or "—",
+            }
+            for bond in bonds
+        ]
+
+    def _fill_edit_form(self, state: _BondsState, entity: Any) -> None:
+        """Заполнить форму правки значениями выбранной облигации."""
+        state.edit_name.value = entity.name
+        state.edit_nominal.value = float(entity.nominal)
+        state.edit_rate.value = entity.coupon_rate
+        state.edit_frequency.value = entity.coupon_frequency
+        state.edit_maturity.value = entity.maturity_date.isoformat()
+        state.edit_issuer.value = entity.issuer or ""
+
+    def _entity_name(self, entity: Any) -> str:
+        """Краткое имя облигации — её ISIN."""
+        return entity.isin
+
+    def _entity_caption(self, entity: Any) -> str:
+        """Полная подпись облигации в label после выбора в таблице."""
+        return f"{entity.isin} — {entity.name}"
+
+    def _build_create_dto(self, state: _BondsState) -> BondCreate:
+        """Собрать ``BondCreate`` из полей формы создания."""
+        return BondCreate(
+            isin=state.isin_input.value or "",
+            name=state.name_input.value or "",
+            nominal=int(state.nominal_input.value or 0),
+            coupon_rate=float(state.coupon_rate_input.value or 0),
+            coupon_frequency=state.frequency_select.value,
+            maturity_date=parse_date(state.maturity_input.value, "Дата погашения"),
+            issuer=state.issuer_input.value or None,
+        )
+
+    def _build_update_dto(self, state: _BondsState) -> BondUpdate:
+        """Собрать ``BondUpdate`` из полей формы правки."""
+        return BondUpdate(
+            name=state.edit_name.value,
+            nominal=int(state.edit_nominal.value) if state.edit_nominal.value is not None else None,
+            coupon_rate=state.edit_rate.value,
+            coupon_frequency=state.edit_frequency.value,
+            maturity_date=(
+                parse_date(state.edit_maturity.value, "Дата погашения")
+                if state.edit_maturity.value
+                else None
+            ),
+            issuer=state.edit_issuer.value or None,
+        )
+
+    def _prevalidate_update(self, state: _BondsState) -> str | None:
+        """Название обязательно при сохранении изменений."""
+        if not state.edit_name.value:
+            return self.name_required_message
+        return None
+
+    async def _service_create(self, state: _BondsState, dto: BondCreate) -> Any:
+        """Создать облигацию через сервис и залогировать факт создания."""
+        bond = await self.bond_service.create(dto, user_id=state.owner_id)
+        logger.info("UI: создана облигация isin=%s", bond.isin)
+        return bond
+
+    async def _service_update(self, state: _BondsState, entity_id: int, dto: BondUpdate) -> Any:
+        """Обновить облигацию через сервис."""
+        return await self.bond_service.update(entity_id, dto, user_id=state.owner_id)
+
+    async def _service_delete(self, state: _BondsState, entity_id: int) -> bool:
+        """Удалить облигацию через сервис и залогировать факт удаления."""
+        deleted = await self.bond_service.delete(entity_id, user_id=state.owner_id)
+        if deleted:
+            logger.info("UI: удалена облигация id=%s", entity_id)
+        return deleted
+
+    # -- Страница ------------------------------------------------------------
+
+    async def render(self, user: TokenPayload) -> None:
         """Таблица облигаций, форма создания и форма правки/удаления выбранной."""
-        user = get_current_user(jwt_service)
-        if user is None:
-            return
-
-        #: Текущий пользователь — владелец создаваемых/изменяемых облигаций.
-        owner_id = user.user_id
-
-        #: Кэш загруженных облигаций по id — источник сырых значений для правки.
-        bonds_cache: dict[int, Any] = {}
-        selected_bond_id: int | None = None
-
-        async def load_rows() -> list[dict[str, Any]]:
-            """Загрузить облигации и обновить кэш для формы правки."""
-            bonds = await bond_service.list_all()
-            bonds_cache.clear()
-            bonds_cache.update({bond.id: bond for bond in bonds})
-            return [
-                {
-                    "id": bond.id,
-                    "isin": bond.isin,
-                    "name": bond.name,
-                    "nominal": bond.nominal,
-                    "coupon_rate": bond.coupon_rate,
-                    "coupon_frequency": _FREQUENCY_OPTIONS.get(
-                        bond.coupon_frequency, bond.coupon_frequency
-                    ),
-                    "maturity_date": fmt_date(bond.maturity_date),
-                    "issuer": bond.issuer or "—",
-                }
-                for bond in bonds
-            ]
-
-        async def reload() -> None:
-            """Перезагрузить таблицу и сбросить выбор облигации."""
-            nonlocal selected_bond_id
-            try:
-                table.rows = await load_rows()
-            except Exception as exc:
-                notify_error(exc)
-                return
-            selected_bond_id = None
-            table.selected = []
-            selected_label.set_text("Облигация не выбрана — отметьте строку в таблице")
-
-        def on_table_select(e: Any) -> None:
-            """Заполнить форму правки при выборе строки таблицы."""
-            nonlocal selected_bond_id
-            selection = e.selection
-            if not selection:
-                selected_bond_id = None
-                return
-            row = selection[0]
-            bond = bonds_cache.get(row["id"])
-            if bond is None:
-                selected_bond_id = None
-                return
-            selected_bond_id = bond.id
-            selected_label.set_text(f"Выбрана облигация: {bond.isin} — {bond.name}")
-            edit_name.value = bond.name
-            edit_nominal.value = float(bond.nominal)
-            edit_rate.value = bond.coupon_rate
-            edit_frequency.value = bond.coupon_frequency
-            edit_maturity.value = bond.maturity_date.isoformat()
-            edit_issuer.value = bond.issuer or ""
-
-        async def handle_create() -> None:
-            """Создать облигацию из формы создания."""
-            try:
-                bond = await bond_service.create(
-                    BondCreate(
-                        isin=isin_input.value or "",
-                        name=name_input.value or "",
-                        nominal=int(nominal_input.value or 0),
-                        coupon_rate=float(coupon_rate_input.value or 0),
-                        coupon_frequency=frequency_select.value,
-                        maturity_date=parse_date(maturity_input.value, "Дата погашения"),
-                        issuer=issuer_input.value or None,
-                    ),
-                    user_id=owner_id,
-                )
-            except (ValidationError, ValueError) as exc:
-                ui.notify(f"Некорректные данные облигации: {exc}", type="negative")
-                return
-            except Exception as exc:
-                notify_error(exc)
-                return
-            logger.info("UI: создана облигация isin=%s", bond.isin)
-            ui.notify(f"Облигация {bond.isin} добавлена", type="positive")
-            await reload()
-
-        async def handle_update() -> None:
-            """Сохранить изменения выбранной облигации."""
-            if selected_bond_id is None:
-                ui.notify("Сначала выберите облигацию в таблице", type="warning")
-                return
-            if not edit_name.value:
-                ui.notify("Название обязательно", type="negative")
-                return
-            try:
-                updated = await bond_service.update(
-                    selected_bond_id,
-                    BondUpdate(
-                        name=edit_name.value,
-                        nominal=int(edit_nominal.value) if edit_nominal.value is not None else None,
-                        coupon_rate=edit_rate.value,
-                        coupon_frequency=edit_frequency.value,
-                        maturity_date=(
-                            parse_date(edit_maturity.value, "Дата погашения")
-                            if edit_maturity.value
-                            else None
-                        ),
-                        issuer=edit_issuer.value or None,
-                    ),
-                    user_id=owner_id,
-                )
-            except (ValidationError, ValueError) as exc:
-                ui.notify(f"Некорректные данные облигации: {exc}", type="negative")
-                return
-            except Exception as exc:
-                notify_error(exc)
-                return
-            if updated is None:
-                ui.notify("Облигация не найдена", type="warning")
-                await reload()
-                return
-            ui.notify(f"Облигация {updated.isin} обновлена", type="positive")
-            await reload()
-
-        async def handle_delete() -> None:
-            """Открыть подтверждение удаления выбранной облигации."""
-            if selected_bond_id is None:
-                ui.notify("Сначала выберите облигацию в таблице", type="warning")
-                return
-            delete_dialog.open()
-
-        async def confirm_delete() -> None:
-            """Удалить выбранную облигацию после подтверждения."""
-            delete_dialog.close()
-            if selected_bond_id is None:
-                return
-            try:
-                deleted = await bond_service.delete(selected_bond_id, user_id=owner_id)
-            except Exception as exc:
-                notify_error(exc)
-                return
-            if deleted:
-                logger.info("UI: удалена облигация id=%s", selected_bond_id)
-                ui.notify("Облигация удалена", type="positive")
-            else:
-                ui.notify("Облигация не найдена", type="warning")
-            await reload()
+        #: State создаётся до построения виджетов, чтобы обработчики (связанные
+        #: через ``functools.partial``) ссылались на уже существующий объект
+        #: ещё в момент построения кнопок.
+        state = _BondsState(owner_id=user.user_id, cache={}, selected_id=None)
 
         page_header("/bonds")
         with ui.column().classes("w-full max-w-5xl mx-auto gap-6"):
@@ -234,44 +226,53 @@ def register_bond_pages(jwt_service: JwtService, bond_service: BondService) -> N
                 rows=[],
                 row_key="id",
                 selection="single",
-                on_select=on_table_select,
             ).classes("w-full")
+            state.table = table
 
             with ui.card().classes("w-full"):
                 ui.label("Новая облигация").classes("text-subtitle1")
                 with ui.row().classes("w-full items-start gap-2"):
-                    isin_input = ui.input("ISIN", validation=_ISIN_RULES)
-                    name_input = ui.input("Название")
-                    nominal_input = ui.number("Номинал", value=1000, min=1)
-                    coupon_rate_input = ui.number("Купонная ставка, %")
-                    frequency_select = ui.select(
+                    state.isin_input = ui.input("ISIN", validation=_ISIN_RULES)
+                    state.name_input = ui.input("Название")
+                    state.nominal_input = ui.number("Номинал", value=1000, min=1)
+                    state.coupon_rate_input = ui.number("Купонная ставка, %")
+                    state.frequency_select = ui.select(
                         _FREQUENCY_OPTIONS, value="ANNUAL", label="Частота купона"
                     )
-                    maturity_input = ui.date_input("Дата погашения")
-                    issuer_input = ui.input("Эмитент (необязательно)")
-                ui.button("Добавить", icon="add", on_click=handle_create)
+                    state.maturity_input = ui.date_input("Дата погашения")
+                    state.issuer_input = ui.input("Эмитент (необязательно)")
+                ui.button("Добавить", icon="add", on_click=partial(self._handle_create, state))
 
             with ui.card().classes("w-full"):
-                selected_label = ui.label(
+                state.selected_label = ui.label(
                     "Облигация не выбрана — отметьте строку в таблице"
                 ).classes("text-subtitle1")
                 with ui.row().classes("w-full items-start gap-2"):
-                    edit_name = ui.input("Название")
-                    edit_nominal = ui.number("Номинал")
-                    edit_rate = ui.number("Купонная ставка, %")
-                    edit_frequency = ui.select(_FREQUENCY_OPTIONS, label="Частота купона")
-                    edit_maturity = ui.date_input("Дата погашения")
-                    edit_issuer = ui.input("Эмитент (необязательно)")
+                    state.edit_name = ui.input("Название")
+                    state.edit_nominal = ui.number("Номинал")
+                    state.edit_rate = ui.number("Купонная ставка, %")
+                    state.edit_frequency = ui.select(_FREQUENCY_OPTIONS, label="Частота купона")
+                    state.edit_maturity = ui.date_input("Дата погашения")
+                    state.edit_issuer = ui.input("Эмитент (необязательно)")
                 with ui.row().classes("gap-2"):
-                    ui.button("Сохранить изменения", icon="save", on_click=handle_update)
-                    ui.button("Удалить", icon="delete", on_click=handle_delete).props(
-                        "color=negative"
+                    ui.button(
+                        "Сохранить изменения",
+                        icon="save",
+                        on_click=partial(self._handle_update, state),
                     )
+                    ui.button(
+                        "Удалить", icon="delete", on_click=partial(self._handle_delete, state)
+                    ).props("color=negative")
 
             with ui.dialog() as delete_dialog, ui.card():
+                state.delete_dialog = delete_dialog
                 ui.label("Удалить выбранную облигацию?")
                 with ui.row():
-                    ui.button("Удалить", on_click=confirm_delete).props("color=negative")
+                    ui.button("Удалить", on_click=partial(self._confirm_delete, state)).props(
+                        "color=negative"
+                    )
                     ui.button("Отмена", on_click=delete_dialog.close).props("flat")
 
-        await reload()
+        table.on_select(partial(self._on_table_select, state))
+
+        await self._reload(state)

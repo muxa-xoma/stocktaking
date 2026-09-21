@@ -14,6 +14,7 @@ from bond_accounting.auth.jwt_service import JwtError
 
 if TYPE_CHECKING:
     from bond_accounting.auth.jwt_service import JwtService, TokenPayload
+    from bond_accounting.brokers.service import BrokerService
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ FALLBACK_MAX_AGE = 1440 * 60
 _NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("/", "Портфель"),
     ("/bonds", "Облигации"),
+    ("/brokers", "Брокеры"),
+    ("/accounts", "Счета"),
     ("/transactions", "Сделки"),
     ("/analytics", "Аналитика"),
 )
@@ -135,6 +138,49 @@ def clear_token_cookie() -> None:
     ui.run_javascript(f"document.cookie = {json.dumps(cookie)};")
 
 
+async def build_account_selector(
+    broker_service: BrokerService,
+    user_id: int,
+    *,
+    mandatory: bool = False,
+) -> ui.select:
+    """Построить выпадающий список брокерских счетов пользователя.
+
+    Args:
+        broker_service: Сервис для загрузки счетов пользователя.
+        user_id: Пользователь, чьи счета показываются.
+        mandatory: Когда ``False`` (по умолчанию), первым пунктом идёт
+            «Все счета» (значение ``0``); когда ``True`` — показываются
+            только реальные счета и первый предвыбирается.
+
+    Returns:
+        Заполненный ``ui.select``. Если у пользователя нет счетов и
+        ``mandatory=True``, список пуст (вызывающий код отвечает за
+        валидацию при добавлении сделки).
+    """
+    accounts = await broker_service.list_accounts_for_user(user_id)
+    options: dict[int | str, str] = {}
+    if not mandatory:
+        options[0] = "Все счета"
+    for acc in accounts:
+        options[acc.id] = f"{acc.broker_name} / {acc.name}"
+    select = ui.select(options, label="Брокер / Счёт")
+    if options:
+        select.value = next(iter(options))
+    return select
+
+
+def resolve_account_id(value: int | str | None) -> int | None:
+    """Преобразовать значение селектора в ``broker_account_id``.
+
+    ``0`` или ``None`` означает «все счета» → возвращается ``None``;
+    любое другое значение возвращается как ``int``.
+    """
+    if value is None or value == 0:
+        return None
+    return int(value)
+
+
 def notify_error(exc: BaseException) -> None:
     """Показать ошибку операции тостом, не раскрывая стектрейс в UI.
 
@@ -197,6 +243,11 @@ def fmt_money(value: float | None) -> str:
 def fmt_percent(value: float | None) -> str:
     """Отформатировать долю (например, ``0.05``) как проценты."""
     return "—" if value is None else f"{value:.2%}"
+
+
+def fmt_raw_percent(value: float | None) -> str:
+    """Отформатировать процентное значение (например, ``5.0``) с двумя знаками после запятой."""
+    return "—" if value is None else f"{value:.2f}%"
 
 
 def fmt_date(value: date | None) -> str:

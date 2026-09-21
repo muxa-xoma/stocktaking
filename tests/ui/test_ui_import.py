@@ -15,7 +15,16 @@ from nicegui import app as nicegui_app
 from bond_accounting.ui import create_ui_app
 
 #: Routes that ``create_ui_app`` must register on the NiceGUI application.
-EXPECTED_ROUTES = {"/login", "/register", "/", "/bonds", "/transactions", "/analytics"}
+EXPECTED_ROUTES = {
+    "/login",
+    "/register",
+    "/",
+    "/bonds",
+    "/brokers",
+    "/accounts",
+    "/transactions",
+    "/analytics",
+}
 
 
 def test_create_ui_app_registers_all_pages() -> None:
@@ -24,6 +33,7 @@ def test_create_ui_app_registers_all_pages() -> None:
         auth_service=MagicMock(),
         jwt_service=MagicMock(),
         bond_service=MagicMock(),
+        broker_service=MagicMock(),
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
     )
@@ -39,6 +49,7 @@ def test_create_ui_app_returns_none() -> None:
         auth_service=MagicMock(),
         jwt_service=MagicMock(),
         bond_service=MagicMock(),
+        broker_service=MagicMock(),
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
     )

@@ -1,6 +1,6 @@
 """REST API router for the bond accounting service.
 
-Exposes 12 endpoints under the ``/api`` prefix. All services arrive
+Exposes 22 endpoints under the ``/api`` prefix. All services arrive
 through FastAPI dependencies (see :mod:`bond_accounting.api.deps`); the
 router never constructs services or the application itself — the app is
 assembled in ``main.py`` which mounts :data:`api_router`.
@@ -8,8 +8,11 @@ assembled in ``main.py`` which mounts :data:`api_router`.
 
 from __future__ import annotations
 
+# Runtime import on purpose: pydantic resolves the postponed `datetime.date`
+# annotations of the request models against the module namespace.
+import datetime  # noqa: TC003
 import logging
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -28,6 +31,7 @@ from bond_accounting.api.deps import (
     get_analytics_service,
     get_auth_service,
     get_bond_service,
+    get_broker_service,
     get_current_user_id,
     get_portfolio_service,
 )
@@ -39,6 +43,22 @@ from bond_accounting.bonds.service import (
     BondNotFoundError,
     BondNotOwnedError,
     BondService,
+)
+from bond_accounting.brokers.dto import (
+    BrokerAccountCreate,
+    BrokerAccountDTO,
+    BrokerAccountUpdate,
+    BrokerCreate,
+    BrokerDTO,
+    BrokerUpdate,
+)
+from bond_accounting.brokers.service import (
+    BrokerAccountHasTransactionsError,
+    BrokerAccountNotFoundError,
+    BrokerHasAccountsError,
+    BrokerNameDuplicateError,
+    BrokerNotFoundError,
+    BrokerService,
 )
 from bond_accounting.portfolio.dto import PositionDTO, TransactionCreate, TransactionDTO
 from bond_accounting.portfolio.service import (
@@ -89,6 +109,50 @@ class TokenResponse(BaseModel):
     """JWT issued by ``POST /api/auth/login``."""
 
     token: str
+
+
+class BrokerCreateRequest(BaseModel):
+    """Creation request body for ``POST /api/brokers``."""
+
+    name: str
+    commission: float = Field(ge=0, default=0.0, description="Commission percent (e.g. 5.0 = 5%).")
+    min_commission: float | None = Field(
+        default=None, ge=0, description="Minimum commission percent."
+    )
+    description: str | None = None
+
+
+class BrokerUpdateRequest(BaseModel):
+    """Partial-update request body for ``PUT /api/brokers/{broker_id}``."""
+
+    name: str | None = None
+    commission: float | None = Field(
+        default=None, ge=0, description="Commission percent (e.g. 5.0 = 5%)."
+    )
+    min_commission: float | None = Field(
+        default=None, ge=0, description="Minimum commission percent."
+    )
+    description: str | None = None
+
+
+class BrokerAccountCreateRequest(BaseModel):
+    """Creation request body for ``POST /api/broker-accounts``."""
+
+    broker_id: int
+    name: str
+    account_number: str | None = None
+    account_type: Literal["STANDARD", "IIS", "LTD"]
+    opened_at: datetime.date | None = None
+
+
+class BrokerAccountUpdateRequest(BaseModel):
+    """Partial-update request body for ``PUT /api/broker-accounts/{account_id}``."""
+
+    name: str | None = None
+    account_number: str | None = None
+    account_type: Literal["STANDARD", "IIS", "LTD"] | None = None
+    opened_at: datetime.date | None = None
+    closed_at: datetime.date | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +294,188 @@ async def delete_bond(
 
 
 # --------------------------------------------------------------------------- #
+# broker endpoints (bearer auth)
+# --------------------------------------------------------------------------- #
+
+
+@api_router.get("/brokers", response_model=list[BrokerDTO])
+async def list_brokers(
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> list[BrokerDTO]:
+    """List all brokers (shared registry)."""
+    return await broker_service.list_all_brokers()
+
+
+@api_router.post("/brokers", status_code=status.HTTP_201_CREATED, response_model=BrokerDTO)
+async def create_broker(
+    data: BrokerCreateRequest,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerDTO:
+    """Create a new broker."""
+    return await broker_service.create_broker(BrokerCreate(**data.model_dump()))
+
+
+@api_router.get("/brokers/{broker_id}", response_model=BrokerDTO)
+async def get_broker(
+    broker_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerDTO:
+    """Fetch one broker by id.
+
+    Raises:
+        HTTPException: 404 when no broker with this id exists.
+    """
+    broker = await broker_service.get_broker(broker_id)
+    if broker is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Broker {broker_id} not found"
+        )
+    return broker
+
+
+@api_router.put("/brokers/{broker_id}", response_model=BrokerDTO)
+async def update_broker(
+    broker_id: int,
+    data: BrokerUpdateRequest,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerDTO:
+    """Partially update a broker (``None`` fields unchanged).
+
+    Raises:
+        HTTPException: 404 when no broker with this id exists.
+    """
+    updated = await broker_service.update_broker(broker_id, BrokerUpdate(**data.model_dump()))
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Broker {broker_id} not found"
+        )
+    return updated
+
+
+@api_router.delete("/brokers/{broker_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_broker(
+    broker_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> None:
+    """Delete a broker.
+
+    Raises:
+        HTTPException: 404 when no broker with this id exists, 409 when the
+        broker still has accounts (mapped by
+        :func:`register_exception_handlers`).
+    """
+    deleted = await broker_service.delete_broker(broker_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Broker {broker_id} not found"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# broker-account endpoints (bearer auth)
+# --------------------------------------------------------------------------- #
+
+
+@api_router.get("/broker-accounts", response_model=list[BrokerAccountDTO])
+async def list_broker_accounts(
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> list[BrokerAccountDTO]:
+    """List the caller's broker accounts."""
+    return await broker_service.list_accounts_for_user(user_id)
+
+
+@api_router.post(
+    "/broker-accounts", status_code=status.HTTP_201_CREATED, response_model=BrokerAccountDTO
+)
+async def create_broker_account(
+    data: BrokerAccountCreateRequest,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerAccountDTO:
+    """Create a broker account for the caller.
+
+    Raises:
+        HTTPException: 404 when the referenced broker does not exist (mapped
+            by :func:`register_exception_handlers`).
+    """
+    return await broker_service.create_account(
+        BrokerAccountCreate(**data.model_dump()), user_id=user_id
+    )
+
+
+@api_router.get("/broker-accounts/{account_id}", response_model=BrokerAccountDTO)
+async def get_broker_account(
+    account_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerAccountDTO:
+    """Fetch one broker account.
+
+    Raises:
+        HTTPException: 404 when no account with this id exists or it is
+            owned by another user.
+    """
+    account = await broker_service.get_account(account_id, user_id=user_id)
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Broker account {account_id} not found",
+        )
+    return account
+
+
+@api_router.put("/broker-accounts/{account_id}", response_model=BrokerAccountDTO)
+async def update_broker_account(
+    account_id: int,
+    data: BrokerAccountUpdateRequest,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> BrokerAccountDTO:
+    """Partially update a broker account (``None`` fields unchanged).
+
+    Raises:
+        HTTPException: 404 when no account with this id exists or it is
+            owned by another user.
+    """
+    updated = await broker_service.update_account(
+        account_id, BrokerAccountUpdate(**data.model_dump()), user_id=user_id
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Broker account {account_id} not found",
+        )
+    return updated
+
+
+@api_router.delete("/broker-accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_broker_account(
+    account_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    broker_service: Annotated[BrokerService, Depends(get_broker_service)],
+) -> None:
+    """Delete a broker account.
+
+    Raises:
+        HTTPException: 404 when no account with this id exists or it is
+            owned by another user; 409 when the account still has
+            transactions (mapped by :func:`register_exception_handlers`).
+    """
+    deleted = await broker_service.delete_account(account_id, user_id=user_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Broker account {account_id} not found",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # transaction endpoints (bearer auth)
 # --------------------------------------------------------------------------- #
 
@@ -239,9 +485,12 @@ async def list_transactions(
     user_id: Annotated[int, Depends(get_current_user_id)],
     portfolio_service: Annotated[PortfolioService, Depends(get_portfolio_service)],
     bond_id: int | None = None,
+    broker_account_id: int | None = None,
 ) -> list[TransactionDTO]:
-    """List the caller's transactions, optionally filtered by bond."""
-    return await portfolio_service.list_transactions(user_id, bond_id=bond_id)
+    """List the caller's transactions, optionally filtered by bond and broker account."""
+    return await portfolio_service.list_transactions(
+        user_id, bond_id=bond_id, broker_account_id=broker_account_id
+    )
 
 
 @api_router.post(
@@ -282,7 +531,8 @@ async def get_portfolio(
     maturity" for typical bonds) and ``cashflows_limit`` (1..5000,
     default 500). They only affect the horizon/size of those sections;
     every other field of the summary is unchanged. Out-of-range values
-    are rejected with 422.
+    are rejected with 422. Passing ``broker_account_id`` restricts the
+    summary to transactions on that broker account.
     """
     return await analytics_service.get_portfolio_summary(
         user_id,
@@ -290,6 +540,7 @@ async def get_portfolio(
         limit=params.next_coupons_limit,
         cashflows_horizon_days=params.cashflows_horizon_days,
         cashflows_limit=params.cashflows_limit,
+        broker_account_id=params.broker_account_id,
     )
 
 
@@ -297,9 +548,10 @@ async def get_portfolio(
 async def get_portfolio_positions(
     user_id: Annotated[int, Depends(get_current_user_id)],
     portfolio_service: Annotated[PortfolioService, Depends(get_portfolio_service)],
+    broker_account_id: int | None = None,
 ) -> list[PositionDTO]:
-    """All open positions for the caller."""
-    return await portfolio_service.get_all_positions(user_id)
+    """All open positions for the caller, optionally restricted to one broker account."""
+    return await portfolio_service.get_all_positions(user_id, broker_account_id=broker_account_id)
 
 
 @api_router.get("/bonds/{bond_id}/yield", response_model=PositionAnalytics)
@@ -352,6 +604,15 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(BondIsinDuplicateError, _detail_response(status.HTTP_409_CONFLICT))
     app.add_exception_handler(BondDeletionBlockedError, _detail_response(status.HTTP_409_CONFLICT))
     app.add_exception_handler(BondNotOwnedError, _detail_response(status.HTTP_403_FORBIDDEN))
+    app.add_exception_handler(BrokerNotFoundError, _detail_response(status.HTTP_404_NOT_FOUND))
+    app.add_exception_handler(
+        BrokerAccountNotFoundError, _detail_response(status.HTTP_404_NOT_FOUND)
+    )
+    app.add_exception_handler(BrokerHasAccountsError, _detail_response(status.HTTP_409_CONFLICT))
+    app.add_exception_handler(BrokerNameDuplicateError, _detail_response(status.HTTP_409_CONFLICT))
+    app.add_exception_handler(
+        BrokerAccountHasTransactionsError, _detail_response(status.HTTP_409_CONFLICT)
+    )
     app.add_exception_handler(
         InsufficientPositionError, _detail_response(status.HTTP_422_UNPROCESSABLE_CONTENT)
     )

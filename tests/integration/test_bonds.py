@@ -35,6 +35,7 @@ from bond_accounting.db import (
     create_engine_from_settings,
     create_session_factory,
 )
+from bond_accounting.db.models import Broker, BrokerAccount
 from bond_accounting.event_bus import AsyncQueueEventBus, Message, Topic
 
 if TYPE_CHECKING:
@@ -133,6 +134,27 @@ async def _drain(events: dict[str, list[Message]], topic: str, count: int) -> li
         while len(events[topic]) < count:
             await asyncio.sleep(0)
     return events[topic]
+
+
+async def _seed_broker_account(
+    session_factory: async_sessionmaker[AsyncSession], user_id: int
+) -> int:
+    """Insert a broker and an account for ``user_id``; return the account id.
+
+    ``Transaction.broker_account_id`` is NOT NULL, so tests seeding
+    transactions directly need an account first. The module-scoped DB is
+    shared across the module's tests, so names are uuid-suffixed.
+    """
+    async with session_factory() as session:
+        broker = Broker(name=f"bond-owner-broker-{uuid.uuid4().hex[:12]}", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        account = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        session.add(account)
+        await session.commit()
+        return account.id
 
 
 def _create_data(isin: str, **overrides: object) -> BondCreate:
@@ -251,11 +273,13 @@ async def test_update_changes_fields_and_publishes_event(bonds_env) -> None:
     created = await service.create(_create_data("RU000A0JW2T9"), user_id=owner_id)
 
     # Seed the owner as the (only) holder so the update fans out to them.
+    account_id = await _seed_broker_account(session_factory, owner_id)
     async with session_factory() as session:
         session.add(
             Transaction(
                 user_id=owner_id,
                 bond_id=created.id,
+                broker_account_id=account_id,
                 type="BUY",
                 quantity=1,
                 price=1000.0,
@@ -335,13 +359,24 @@ async def test_delete_with_transactions_raises_blocked(bonds_env) -> None:
 
     # Seed a user and one transaction referencing the bond.
     async with session_factory() as session:
-        user = User(username="svc-delete-user", password_hash="$2b$12$placeholder")
+        user = User(
+            username=f"svc-delete-user-{uuid.uuid4().hex[:12]}", password_hash="$2b$12$placeholder"
+        )
         session.add(user)
+        await session.flush()
+        broker = Broker(name=f"svc-delete-broker-{uuid.uuid4().hex[:12]}", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        account = BrokerAccount(
+            user_id=user.id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        session.add(account)
         await session.flush()
         session.add(
             Transaction(
                 user_id=user.id,
                 bond_id=created.id,
+                broker_account_id=account.id,
                 type="BUY",
                 quantity=1,
                 price=1000.0,
@@ -372,11 +407,13 @@ async def test_event_payloads_for_full_lifecycle(bonds_env) -> None:
     created = await service.create(_create_data("RU000A0JY7C1"), user_id=owner_id)
 
     # Seed the owner as the (only) holder so the update fans out to them.
+    account_id = await _seed_broker_account(session_factory, owner_id)
     async with session_factory() as session:
         session.add(
             Transaction(
                 user_id=owner_id,
                 bond_id=created.id,
+                broker_account_id=account_id,
                 type="BUY",
                 quantity=1,
                 price=1000.0,

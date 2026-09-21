@@ -71,11 +71,17 @@ def test_message_requires_topic_and_sender() -> None:
 
 
 def test_all_topics_registry() -> None:
-    assert len(ALL_TOPICS) == 6
+    assert len(ALL_TOPICS) == 12
     for name in (
         Topic.BOND_CREATED,
         Topic.BOND_UPDATED,
         Topic.BOND_DELETED,
+        Topic.BROKER_CREATED,
+        Topic.BROKER_UPDATED,
+        Topic.BROKER_DELETED,
+        Topic.BROKER_ACCOUNT_CREATED,
+        Topic.BROKER_ACCOUNT_UPDATED,
+        Topic.BROKER_ACCOUNT_DELETED,
         Topic.TRANSACTION_CREATED,
         Topic.POSITION_UPDATED,
         Topic.PORTFOLIO_RECALCULATED,

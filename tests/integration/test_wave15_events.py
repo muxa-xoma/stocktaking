@@ -17,6 +17,7 @@ import asyncio
 import datetime
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,7 @@ from bond_accounting.analytics import AnalyticsService, PortfolioSummary, attach
 from bond_accounting.bonds import BondCreate, BondService, BondUpdate
 from bond_accounting.config.settings import DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
-from bond_accounting.db.models import Bond, Transaction, User
+from bond_accounting.db.models import Bond, Broker, BrokerAccount, Transaction, User
 from bond_accounting.event_bus import AsyncQueueEventBus, Message, RequestHandlerError, Topic
 from bond_accounting.portfolio import PortfolioService, TransactionCreate
 
@@ -131,6 +132,24 @@ async def _seed_user(session_factory: async_sessionmaker[AsyncSession], username
         return user.id
 
 
+async def _seed_account(session_factory: async_sessionmaker[AsyncSession], user_id: int) -> int:
+    """Insert a broker and an account for ``user_id``; return the account id.
+
+    ``TransactionCreate`` requires a ``broker_account_id`` owned by the user,
+    and direct ``Transaction`` inserts need a NOT NULL ``broker_account_id``.
+    """
+    async with session_factory() as session:
+        broker = Broker(name=f"broker-{user_id}-{uuid.uuid4().hex[:8]}", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        account = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        session.add(account)
+        await session.commit()
+        return account.id
+
+
 def _recorder(events: list[Message]) -> Callable[[Message], Awaitable[None]]:
     async def handler(message: Message) -> None:
         events.append(message)
@@ -162,10 +181,19 @@ async def test_bond_updated_fans_out_one_event_per_holder(
     )
     async with session_factory() as session:
         for user_id in (owner_id, holder_b):
+            broker = Broker(name=f"fanout-broker-{user_id}", commission=0.3)
+            session.add(broker)
+            await session.flush()
+            account = BrokerAccount(
+                user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+            )
+            session.add(account)
+            await session.flush()
             session.add(
                 Transaction(
                     user_id=user_id,
                     bond_id=created.id,
+                    broker_account_id=account.id,
                     type="BUY",
                     quantity=1,
                     price=1000.0,
@@ -267,6 +295,7 @@ async def test_analytics_summary_cached_until_event_invalidates_it(
     recompute; GET paths never publish events."""
 
     user_id = await _seed_user(session_factory, "cache-user")
+    account_id = await _seed_account(session_factory, user_id)
     async with session_factory() as session:
         bond = Bond(
             isin="RU000A0JX3K9",
@@ -318,6 +347,7 @@ async def test_analytics_summary_cached_until_event_invalidates_it(
             user_id,
             TransactionCreate(
                 bond_id=bond_id,
+                broker_account_id=account_id,
                 type="BUY",
                 quantity=2,
                 price=1000.0,

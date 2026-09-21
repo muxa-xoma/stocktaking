@@ -16,6 +16,7 @@ from bond_accounting.analytics import AnalyticsService
 from bond_accounting.api import api_router, build_api_dependencies, register_exception_handlers
 from bond_accounting.auth import AuthService, JwtService, PasswordHasher
 from bond_accounting.bonds.service import BondService
+from bond_accounting.brokers.service import BrokerService
 from bond_accounting.config.settings import ENV_PREFIX, AuthConfig, DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
 from bond_accounting.event_bus import AsyncQueueEventBus
@@ -133,6 +134,7 @@ def app(
     jwt_service = JwtService(AuthConfig(jwt_secret=jwt_secret))
     auth_service = AuthService(session_factory, PasswordHasher(), jwt_service)
     bond_service = BondService(session_factory, event_bus)
+    broker_service = BrokerService(session_factory, event_bus)
     portfolio_service = PortfolioService(session_factory, event_bus)
     analytics_service = AnalyticsService(session_factory, event_bus)
 
@@ -144,6 +146,7 @@ def app(
             auth_service,
             jwt_service,
             bond_service,
+            broker_service,
             portfolio_service,
             analytics_service,
         ).overrides()

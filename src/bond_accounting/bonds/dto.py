@@ -60,7 +60,10 @@ class BondCreate(BaseModel):
     # negative rates are rejected.
     coupon_rate: float = Field(
         ge=0,
-        description="Annual coupon rate in percent, e.g. 12.5 means 12.5%. Zero is valid (zero-coupon bond).",
+        description=(
+            "Annual coupon rate in percent, e.g. 12.5 means 12.5%. "
+            "Zero is valid (zero-coupon bond)."
+        ),
     )
     coupon_frequency: CouponFrequency = Field(description="Coupon payment frequency.")
     maturity_date: datetime.date = Field(description="Date the principal is repaid.")

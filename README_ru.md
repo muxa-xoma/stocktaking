@@ -278,5 +278,5 @@ uv run ruff format --check .
 uv run mypy src
 uv run ty check src tests
 uv run pyrefly check --min-severity warn
-uv run pytest -q
+uv run pytest -q --cov=bond_accounting
 ```

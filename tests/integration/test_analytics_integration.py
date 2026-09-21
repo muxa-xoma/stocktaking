@@ -20,7 +20,7 @@ from alembic.config import Config as AlembicConfig
 from bond_accounting.analytics import AnalyticsService, attach_to_event_bus
 from bond_accounting.config.settings import DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
-from bond_accounting.db.models import Bond, User
+from bond_accounting.db.models import Bond, Broker, BrokerAccount, User
 from bond_accounting.event_bus import AsyncQueueEventBus, Topic
 from bond_accounting.portfolio import PortfolioService, TransactionCreate
 
@@ -42,6 +42,11 @@ _EVENT_TIMEOUT = 2.0
 #: Fixed valuation date used for deterministic coupon-grid arithmetic.
 TODAY = datetime.date(2026, 2, 1)
 
+#: Broker account used by ``_txn`` when none is passed explicitly. Set by the
+#: ``broker_account_ids`` fixture (autouse); filtering tests pass an explicit
+#: account.
+_default_account_id: int | None = None
+
 
 def _txn(
     bond_id: int,
@@ -50,10 +55,15 @@ def _txn(
     price: float,
     day: int,
     commission: float = 0.0,
+    account_id: int | None = None,
 ) -> TransactionCreate:
     """Build a TransactionCreate dated 2026-01-<day>."""
+    resolved = account_id if account_id is not None else _default_account_id
+    if resolved is None:
+        raise RuntimeError("no broker_account_id: depend on the broker_account_ids fixture")
     return TransactionCreate(
         bond_id=bond_id,
+        broker_account_id=resolved,
         type=type_,
         quantity=quantity,
         price=price,
@@ -149,6 +159,38 @@ async def user_and_bond_ids(session_factory: async_sessionmaker[AsyncSession]) -
         session.add(bond)
         await session.commit()
         return user.id, bond.id
+
+
+@pytest.fixture(autouse=True)
+async def broker_account_ids(
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+) -> AsyncGenerator[tuple[int, int]]:
+    """Two broker accounts of the test user; also sets the ``_txn`` default.
+
+    Autouse: ``TransactionCreate`` requires a ``broker_account_id`` owned by
+    the user. The first account is the implicit default; the per-account
+    filtering tests pass the second one explicitly.
+    """
+    global _default_account_id
+    user_id, _ = user_and_bond_ids
+    async with session_factory() as session:
+        broker = Broker(name="Тестовый брокер", commission=0.3)
+        session.add(broker)
+        await session.flush()
+        first = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Основной", account_type="STANDARD"
+        )
+        second = BrokerAccount(
+            user_id=user_id, broker_id=broker.id, name="Дополнительный", account_type="IIS"
+        )
+        session.add_all([first, second])
+        await session.commit()
+        _default_account_id = first.id
+        try:
+            yield first.id, second.id
+        finally:
+            _default_account_id = None
 
 
 # --------------------------------------------------------------------- #
@@ -364,3 +406,75 @@ async def test_attach_to_event_bus_ignores_events_without_user_id(
     finally:
         for unsubscribe in unsubscribers:
             unsubscribe()
+
+
+# --------------------------------------------------------------------- #
+# broker_account_id filtering
+
+
+async def test_portfolio_summary_by_account(
+    analytics_service: AnalyticsService,
+    portfolio_service: PortfolioService,
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    """A per-account summary counts only that account's transactions."""
+    user_id, bond_id = user_and_bond_ids
+    first, second = broker_account_ids
+
+    await portfolio_service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+    await portfolio_service.add_transaction(
+        user_id, _txn(bond_id, "BUY", 4, 1000.0, 12, account_id=second)
+    )
+    await portfolio_service.add_transaction(
+        user_id, _txn(bond_id, "SELL", 4, 1050.0, 15, commission=5.0, account_id=second)
+    )
+
+    first_summary = await analytics_service.get_portfolio_summary(
+        user_id, today=TODAY, broker_account_id=first
+    )
+    assert len(first_summary.positions) == 1
+    assert first_summary.positions[0].quantity == 10
+    assert first_summary.total_invested == pytest.approx(10_000.0)
+    # No sells happened on the first account.
+    assert first_summary.realized_pnl.total == 0.0
+
+    second_summary = await analytics_service.get_portfolio_summary(
+        user_id, today=TODAY, broker_account_id=second
+    )
+    # The second account bought 4 and sold them all: no open position, and
+    # the realized PnL is that account's sells (200) minus commissions (5).
+    assert second_summary.positions == []
+    assert second_summary.realized_pnl.sells == pytest.approx(200.0)
+    assert second_summary.realized_pnl.commissions == pytest.approx(5.0)
+    assert second_summary.realized_pnl.total == pytest.approx(195.0)
+
+
+async def test_position_analytics_by_account(
+    analytics_service: AnalyticsService,
+    portfolio_service: PortfolioService,
+    user_and_bond_ids: tuple[int, int],
+    broker_account_ids: tuple[int, int],
+) -> None:
+    """get_position_analytics is restricted to one account's transactions."""
+    user_id, bond_id = user_and_bond_ids
+    first, second = broker_account_ids
+
+    await portfolio_service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+    await portfolio_service.add_transaction(
+        user_id, _txn(bond_id, "BUY", 5, 1100.0, 11, account_id=second)
+    )
+
+    first_analytics = await analytics_service.get_position_analytics(
+        user_id, bond_id, today=TODAY, broker_account_id=first
+    )
+    assert first_analytics is not None
+    assert first_analytics.quantity == 10
+    assert first_analytics.avg_buy_price == pytest.approx(1000.0)
+
+    second_analytics = await analytics_service.get_position_analytics(
+        user_id, bond_id, today=TODAY, broker_account_id=second
+    )
+    assert second_analytics is not None
+    assert second_analytics.quantity == 5
+    assert second_analytics.avg_buy_price == pytest.approx(1100.0)

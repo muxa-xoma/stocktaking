@@ -17,6 +17,7 @@ from tests.rest_utils import (
     BOND_PAYLOAD,
     PASSWORD,
     USERNAME,
+    _create_account_for_user,
     _create_bond,
     _register_and_login,
 )
@@ -169,11 +170,13 @@ async def test_create_bond_invalid_frequency_unprocessable(client: httpx.AsyncCl
 async def test_sell_more_than_position_unprocessable(client: httpx.AsyncClient) -> None:
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
+    account = await _create_account_for_user(client, headers)
 
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond["id"],
+            "broker_account_id": account["id"],
             "type": "SELL",
             "quantity": 999,
             "price": 1050.0,
@@ -195,10 +198,12 @@ async def test_yield_without_open_position_not_found(client: httpx.AsyncClient) 
 async def test_transaction_non_positive_quantity_unprocessable(client: httpx.AsyncClient) -> None:
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
+    account = await _create_account_for_user(client, headers)
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond["id"],
+            "broker_account_id": account["id"],
             "type": "BUY",
             "quantity": 0,
             "price": 1000.0,
@@ -221,10 +226,12 @@ async def test_transaction_non_positive_price_unprocessable(
     """A non-positive price is a data-entry error: HTTP 422."""
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
+    account = await _create_account_for_user(client, headers)
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond["id"],
+            "broker_account_id": account["id"],
             "type": "BUY",
             "quantity": 1,
             "price": price,
@@ -239,10 +246,12 @@ async def test_transaction_positive_fractional_price_created(client: httpx.Async
     """Boundary sanity: any strictly positive price passes validation."""
     headers = await _register_and_login(client)
     bond = await _create_bond(client, headers)
+    account = await _create_account_for_user(client, headers)
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond["id"],
+            "broker_account_id": account["id"],
             "type": "BUY",
             "quantity": 1,
             "price": 100.5,
@@ -267,11 +276,13 @@ async def test_portfolio_yields_with_large_nominal_are_not_none(
     response = await client.post("/api/bonds", json=payload, headers=headers)
     assert response.status_code == 201, response.text
     bond_id = response.json()["id"]
+    account = await _create_account_for_user(client, headers)
 
     response = await client.post(
         "/api/transactions",
         json={
             "bond_id": bond_id,
+            "broker_account_id": account["id"],
             "type": "BUY",
             "quantity": 5,
             "price": 10000.0,

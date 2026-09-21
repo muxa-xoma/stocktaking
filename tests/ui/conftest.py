@@ -26,6 +26,7 @@ from nicegui.testing.general import nicegui_reset_globals, prepare_simulation
 from bond_accounting.analytics.service import AnalyticsService
 from bond_accounting.auth.service import AuthService
 from bond_accounting.bonds.service import BondService
+from bond_accounting.brokers.service import BrokerService
 from bond_accounting.portfolio.service import PortfolioService
 from bond_accounting.ui import create_ui_app
 
@@ -97,6 +98,12 @@ def auth_service() -> AuthService:
 def bond_service() -> BondService:
     """Мок CRUD-сервиса облигаций."""
     return create_autospec(BondService, instance=True)
+
+
+@pytest.fixture
+def broker_service() -> BrokerService:
+    """Мок CRUD-сервиса брокеров и брокерских счетов."""
+    return create_autospec(BrokerService, instance=True)
 
 
 @pytest.fixture
@@ -195,6 +202,7 @@ async def ui_user(
     jwt_service: JwtService,
     auth_service: AuthService,
     bond_service: BondService,
+    broker_service: BrokerService,
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
 ) -> AsyncGenerator[SimUser]:
@@ -215,6 +223,7 @@ async def ui_user(
                 auth_service=auth_service,
                 jwt_service=jwt_service,
                 bond_service=bond_service,
+                broker_service=broker_service,
                 portfolio_service=portfolio_service,
                 analytics_service=analytics_service,
             )
