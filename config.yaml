@@ -1,0 +1,32 @@
+app:
+  host: "127.0.0.1"
+  port: 8080
+  debug: false
+
+database:
+  driver: "sqlite"
+  sqlite_path: "data/bond_accounting.db"
+  # connect_args override the default SQLite pragmas (user wins):
+  # connect_args:
+  #   journal_mode: "delete"
+  # PostgreSQL:
+  # driver: "postgresql"
+  # host: "localhost"
+  # port: 5432
+  # user: "bond"
+  # password: "secret"
+  # dbname: "bond_accounting"
+  # connect_args:
+  #   sslmode: "disable"
+
+auth:
+  jwt_secret: "change-me-in-production"
+  jwt_algorithm: "HS256"
+  jwt_expires_minutes: 1440
+
+logging:
+  level: "INFO"
+  format: "json"   # "json" | "text"
+
+event_bus:
+  max_queue_size: 10000

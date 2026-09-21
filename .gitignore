@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime data (SQLite DBs)
+data/*.db
+data/*.db-journal
+data/*.sqlite3
+
+# Environment / secrets
+.env
+.env.*
+
+# IDEs
+.idea/
+.vscode/
+.zed/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agents
+.agents

@@ -1,0 +1,103 @@
+[project]
+name = "bond-accounting"
+version = "0.1.0"
+description = "Bond portfolio accounting service"
+readme = "README.md"
+authors = [
+    { name = "Mikhael Fomenko", email = "muxa-xoma@mail.ru" }
+]
+requires-python = ">=3.14,<4.0"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.20.0",
+    "bcrypt>=4.0.1",
+    "fastapi>=0.141.1",
+    "msgspec>=0.21.1",
+    "nicegui>=3.17.1",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.14.0",
+    "python-json-logger>=4.2.0",
+    "pyyaml>=6.0.3",
+    "sqlalchemy[asyncio]>=2.0.54",
+]
+
+[project.scripts]
+bond-accounting = "bond_accounting.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "httpx>=0.28.1",
+    "ruff>=0.16.8",
+    "mypy>=1.0.0",
+    "types-pyyaml>=6.0.12.20260906",
+    "ty>=0.0.82",
+    "pyrefly>=1.3.1",
+    "pytest-cov>=6.0.0",
+    "bandit>=1.8.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = [".agents", "data"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E741",   # ambiguous name (too strict)
+    "RUF001", # ambiguous-unicode-character-string (Cyrillic false positives)
+    "RUF002", # ambiguous-unicode-character-docstring (Cyrillic false positives)
+    "RUF003", # ambiguous-unicode-character-comment (Cyrillic false positives)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bond_accounting"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+files = ["src", "tests"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = [".agents", "data"]
+
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.14"
+root = ["src"]
+
+[tool.pyrefly]
+project-includes = ["src/**", "tests/**"]
+project-excludes = [".agents/**", "data/**"]
+python-version = "3.14"
