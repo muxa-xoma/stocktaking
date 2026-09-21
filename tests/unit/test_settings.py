@@ -1,4 +1,3 @@
-# pyrefly: ignore-errors
 """Tests for the pydantic-settings based configuration."""
 
 from __future__ import annotations
@@ -251,4 +250,4 @@ def test_logging_config_normalizes_level_case() -> None:
 def test_logging_config_rejects_invalid_format() -> None:
     """Only "json" and "text" are valid formats."""
     with pytest.raises(ValidationError, match="format"):
-        LoggingConfig(format="xml")  # type: ignore[arg-type]  # invalid on purpose; ty: ignore[invalid-argument-type]
+        LoggingConfig(format="xml")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]  # pyrefly: ignore[bad-argument-type]  # invalid on purpose: negative test of pydantic validation

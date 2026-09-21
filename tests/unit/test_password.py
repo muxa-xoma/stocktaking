@@ -66,7 +66,7 @@ class TestHashTooLong:
 
         assert len(password) < 72
         assert len(password.encode("utf-8")) > 72
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="72-byte limit"):
             hasher.hash(password)
 
 

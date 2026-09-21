@@ -11,8 +11,8 @@ def test_import_package() -> None:
 
 def test_settings_model() -> None:
     s = Settings(
-        auth={"jwt_secret": "test-secret"},  # type: ignore[arg-type]  # pydantic coerces nested dicts
+        auth={"jwt_secret": "test-secret-0123456789-abcdefghijklmnopqrstuvwxyz"},  # type: ignore[arg-type]  # pydantic coerces nested dicts
     )
     assert s.app.port == 8080
     assert s.database.url == "sqlite+aiosqlite:///data/bond_accounting.db"
-    assert s.auth.jwt_secret == "test-secret"
+    assert s.auth.jwt_secret == "test-secret-0123456789-abcdefghijklmnopqrstuvwxyz"

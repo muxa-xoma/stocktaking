@@ -6,7 +6,7 @@ from datetime import date
 
 from nicegui import ui
 
-from tests._ui_utils import (
+from tests.ui._ui_utils import (
     authenticate,
     cards,
     click,
@@ -178,7 +178,11 @@ async def test_isin_input_validation_rule(ui_user, valid_token, bond_service) ->
 
     isin_input.value = "RU000A0JX0J2"
     assert isin_input.validate() is True
-    assert isin_input.error is None
+    # После успешной валидации поле ошибки сбрасывается.
+    # strict None check is intentional: pyrefly narrows error to str
+    # from the assert above, but NiceGUI resets it to None after
+    # successful validation (untracked by flow analysis).
+    assert isin_input.error is None  # pyrefly: ignore[unnecessary-comparison]
 
 
 async def _select_first_bond(ui_user) -> dict:

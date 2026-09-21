@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 def elements(
     user: User,
     *,
-    kind: type | None = None,
+    kind: type[Element] | None = None,
     content: str | None = None,
     within: Element | None = None,
 ) -> list[Any]:
@@ -61,7 +61,7 @@ def elements(
 def one(
     user: User,
     *,
-    kind: type | None = None,
+    kind: type[Element] | None = None,
     content: str | None = None,
     within: Element | None = None,
 ) -> Any:

@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 BOND_TOPICS = (Topic.BOND_CREATED, Topic.BOND_UPDATED, Topic.BOND_DELETED)
 
@@ -147,6 +147,8 @@ def _create_data(isin: str, **overrides: object) -> BondCreate:
         "issuer": "Test issuer",
     }
     fields.update(overrides)
+    # Intentional: kwargs are built dynamically from a dict[str, object],
+    # so mypy cannot verify individual argument types against BondCreate.
     return BondCreate(**fields)  # type: ignore[arg-type]
 
 

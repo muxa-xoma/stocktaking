@@ -1,17 +1,20 @@
 # bond-accounting
 
-Bond portfolio accounting service (Python 3.12+).
+**Available in:** [English](README.md) | [Русский](README_ru.md)
+
+Bond portfolio accounting service (Python 3.14+).
 
 ## What it is
 
 A service for bond portfolio accounting: bond instruments and operations,
 portfolio management, yield calculations, analytics, JWT-based auth, and a
-web UI / HTTP API. This repository is at the skeleton stage — packages are
-stubs, only the configuration system is functional.
+web UI / HTTP API. The application is served by a single entry point that
+applies Alembic migrations, wires up the services and the internal event bus,
+and serves the NiceGUI UI and the REST API on one port.
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
 
 ## Install
@@ -26,8 +29,11 @@ uv sync
 uv run bond-accounting
 ```
 
-(Placeholder for now: prints a startup message and exits; full application
-bootstrap is implemented in a later task.)
+The command loads the configuration (see below), applies pending Alembic
+migrations, starts the in-process event bus, and serves the NiceGUI UI and the
+REST API on one port. OpenAPI docs are available at `/docs` and `/redoc`.
+Press Ctrl+C for a graceful shutdown. Pass `--config path/to/file.yaml` to use
+a non-default configuration file.
 
 ## Configuration
 
@@ -173,21 +179,21 @@ BOND_DATABASE__SQLITE_PATH=/tmp/new.db uv run alembic upgrade head
 ```
 src/
   bond_accounting/
-    main.py        # entry point (placeholder)
-    config/       # Pydantic + YAML settings
+    main.py        # entry point: composition root, startup/graceful shutdown
+    config/       # Pydantic + YAML settings, logging setup
     db/           # async SQLAlchemy models, engine/session factory
-    event_bus/    # internal event bus (stub)
-    auth/         # JWT auth (stub)
-    bonds/        # bond instruments (stub)
-    portfolio/    # portfolio management (stub)
-    yield_calc/   # yield calculations (stub)
-    analytics/    # analytics (stub)
-    ui/           # web UI (stub)
-    api/          # HTTP API (stub)
+    event_bus/    # in-process async event bus
+    auth/         # JWT auth: password hashing, token issue/verify, service
+    bonds/        # bond instruments CRUD
+    portfolio/    # portfolio management, position netting
+    yield_calc/   # yield calculations (accrued coupon, current yield, YTM)
+    analytics/    # analytics (subscribed to the event bus)
+    ui/           # NiceGUI web UI (auth, bonds, transactions, portfolio, analytics)
+    api/          # REST API (FastAPI router, dependencies, error handling)
     external_bus/ # external bus (future)
 alembic/          # Alembic migrations (async env.py)
 alembic.ini       # Alembic configuration (no database URL)
-tests/           # pytest tests
+tests/           # pytest test suite (layered, see Development)
 config.yaml     # example configuration
 data/           # SQLite database files (runtime)
 ```
@@ -198,11 +204,31 @@ under `src/bond_accounting/`.
 ## Development
 
 ```bash
-uv sync --all-extras --group dev  # install runtime + dev dependencies
-uv run pytest             # tests
-uv run ruff check .       # lint
-uv run mypy src           # type check
+uv sync --all-extras --group dev                # install runtime + dev dependencies
+uv run pytest -q                               # all tests (unit/integration/api/functional/ui)
+uv run ruff check .                             # lint
+uv run mypy src                                 # type check
 ```
+
+The test suite is layered: `tests/{unit,integration,api,functional,ui}/`.
+Shared fixtures live in `tests/conftest.py` (the fixture stack used by all
+layers); `tests/rest_utils.py` provides shared REST constants and helpers.
+A single `uv run pytest -q` invocation runs every layer.
+
+## Test Coverage
+
+Coverage is measured with [pytest-cov](https://pytest-cov.readthedocs.io/)
+(included in the `dev` dependency group):
+
+```bash
+uv run pytest -q --cov=bond_accounting --cov-report=term-missing
+```
+
+This prints per-module line coverage with the uncovered line numbers. Add
+`--cov-report=html` to get a browsable HTML report in `htmlcov/`. The current
+line coverage of `bond_accounting/` is about 92%. The entry point `main.py`
+is not exercised by tests (it is verified by actually running the
+application); without `main.py` the coverage is about 97%.
 
 ## Code Quality
 
@@ -217,12 +243,19 @@ open questions in the tooling task tracker) — they are not yet blocking.
 | | | `uv run ruff format --check .` |
 | [mypy](https://mypy-lang.org/) | Type checker (gate) | `uv run mypy src` |
 | [ty](https://docs.astral.sh/ty/) | Type checker (Astral) | `uv run ty check src tests` |
-| [Pyrefly](https://pyrefly.org/) | Type checker (Meta) | `uv run pyrefly check` |
+| [Pyrefly](https://pyrefly.org/) | Type checker (Meta) | `uv run pyrefly check --min-severity warn` |
+
+> **Note on the pyrefly "suppressed" counter:** the summary line
+> `N suppressed` is not the number of actually hidden diagnostics —
+> ignore directives may contribute phantom counts. To see what is really
+> suppressed, run
+> `uv run pyrefly check --enabled-ignores pyre --min-severity ignore --output-format json`.
 
 Configuration lives in `pyproject.toml`: `[tool.ruff]`, `[[tool.mypy.overrides]]`,
 `[tool.ty]`, and `[tool.pyrefly]`. `ty` checks `src/` and `tests/` (config
 `[tool.ty.src] include`); `pyrefly` runs in project mode picking up
-`[tool.pyrefly]` (includes `src/**` and `tests/**`).
+`[tool.pyrefly]` (includes `src/**` and `tests/**`). Note that `pyrefly`
+hides warnings by default, hence `--min-severity warn` in the table above.
 
 Run everything at once:
 
@@ -231,6 +264,6 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src
 uv run ty check src tests
-uv run pyrefly check
+uv run pyrefly check --min-severity warn
 uv run pytest -q
 ```

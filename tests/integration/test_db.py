@@ -27,7 +27,7 @@ from bond_accounting.db import (
     create_session_factory,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_COLUMNS = {
     "users": {"id", "username", "password_hash"},

@@ -18,7 +18,11 @@ from bond_accounting.ui.common import (
     parse_date,
     token_max_age,
 )
-from tests._ui_utils import authenticate, click, one
+from tests.ui._ui_utils import (
+    authenticate,
+    click,
+    one,
+)
 
 # --------------------------------------------------------------------------- #
 # чистые функции

@@ -1,0 +1,282 @@
+# bond-accounting
+
+**Доступно на:** [Русский](README_ru.md) | [English](README.md)
+
+Сервис учёта облигационного портфеля (Python 3.14+).
+
+## Что это
+
+Сервис для ведения облигационного портфеля: инструменты (облигации) и операции
+с ними (покупка / продажа / погашение), учёт портфеля и позиций, расчёт
+доходностей (YTM, текущая доходность, НКД, график купонов), аналитика,
+JWT-аутентификация, а также веб-интерфейс (NiceGUI) и REST API (FastAPI),
+обслуживаемые на одном порту.
+
+## Требования
+
+- Python 3.14+
+- [uv](https://docs.astral.sh/uv/)
+
+## Установка
+
+```bash
+uv sync
+```
+
+## Запуск
+
+```bash
+uv run bond-accounting
+```
+
+Полезное о запуске:
+
+- Конфигурация читается из `config.yaml` в рабочей директории; путь к ней
+  можно переопределить флагом `--config <путь>`. Переменные окружения
+  `BOND_*` всегда имеют приоритет над файлом.
+- При старте миграции применяются автоматически (`alembic upgrade head`
+  выполняется in-process) — отдельно запускать их не нужно.
+- UI и REST API обслуживаются на одном порту (по умолчанию
+  `127.0.0.1:8080`); OpenAPI-документация доступна по адресам `/docs` и
+  `/redoc`.
+- Остановка по SIGINT/SIGTERM — корректная (graceful shutdown).
+
+## Конфигурация
+
+Конфигурация собирается
+[pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+из нескольких источников. Приоритет, от высшего к низшему:
+
+1. аргументы конструктора (`Settings(auth={...})`),
+2. переменные окружения с префиксом `BOND_` (разделитель уровней вложенности —
+   `__`),
+3. YAML-файл (`config.yaml` в рабочей директории по умолчанию либо путь,
+   переданный в `load_settings(config_path)`),
+4. значения по умолчанию из моделей.
+
+Полная структура показана в примере `config.yaml` в корне репозитория:
+
+```yaml
+app:
+  host: "127.0.0.1"
+  port: 8080
+  debug: false
+
+database:
+  driver: "sqlite"                # "sqlite" | "postgresql"
+  sqlite_path: "data/bond_accounting.db"
+  # connect_args override the default SQLite pragmas (user wins):
+  # connect_args:
+  #   journal_mode: "delete"
+  # PostgreSQL:
+  # driver: "postgresql"
+  # host: "localhost"
+  # port: 5432
+  # user: "bond"
+  # password: "secret"
+  # dbname: "bond_accounting"
+  # connect_args:
+  #   sslmode: "disable"
+
+auth:
+  jwt_secret: "change-me-in-production"
+  jwt_algorithm: "HS256"
+  jwt_expires_minutes: 1440
+
+logging:
+  level: "INFO"
+  format: "json"   # "json" | "text"
+
+event_bus:
+  max_queue_size: 10000
+```
+
+Подключение к базе данных задаётся структурно; async SQLAlchemy URL строится
+из этих полей (специальные символы в пароле URL-кодируются автоматически):
+
+- SQLite: `sqlite+aiosqlite:///data/bond_accounting.db` (только async-драйвер)
+- PostgreSQL: `postgresql+psycopg://user:password@host:port/dbname?param=value`
+  (psycopg 3 работает с `create_async_engine`)
+
+Для SQLite на каждое соединение применяется набор прагм по умолчанию
+(`auto_vacuum=1`, `journal_mode=wal`, `synchronous=1`, `temp_store=2`,
+`cache_size=-64000`, `foreign_keys=1`). Значения из `database.connect_args`
+переопределяют эти умолчания — пользовательский выбор побеждает: например,
+`connect_args: {journal_mode: delete}` заменит `wal`, остальные прагмы
+останутся. Для PostgreSQL `connect_args` попадают в query-строку URL
+(например, `sslmode`).
+
+Движок создаётся функцией `create_engine_from_settings(db_config)` из
+`bond_accounting.db.engine` (см. [База данных](#база-данных)). Для SQLite
+прагмы применяются на каждом новом соединении слушателем события `connect`,
+который выполняет инструкции `PRAGMA key = value`, — а не через
+`connect_args` движка: диалект aiosqlite передаёт `connect_args` без изменений
+в `sqlite3.connect`, который не принимает ключи прагм.
+
+Логирование настраивается функцией `setup_logging(settings.logging)` из
+`bond_accounting.config.logging_setup`: `format: "json"` выдаёт
+машиночитаемые JSON-логи (через msgspec-бэкенд `python-json-logger`) со всеми
+стандартными полями и любыми `extra=`-аргументами; `format: "text"` —
+читаемые строки вида
+`2026-09-20 12:00:00 | INFO | bond_accounting.bonds | message | key=value`.
+
+Переменные окружения используют префикс `BOND_` и разделитель `__` для уровней
+вложенности:
+
+```bash
+BOND_AUTH__JWT_SECRET="super-secret"
+BOND_APP__PORT="9000"
+BOND_DATABASE__DRIVER="postgresql"
+BOND_DATABASE__HOST="db.example.com"
+BOND_DATABASE__SQLITE_PATH="/var/lib/bonds.db"
+BOND_EVENT_BUS__MAX_QUEUE_SIZE="5000"
+BOND_LOGGING__LEVEL="DEBUG"
+BOND_LOGGING__FORMAT="text"
+```
+
+> Примечание: старые «плоские» имена `BOND_DATABASE_URL` и
+> `BOND_AUTH_JWT_SECRET` больше не поддерживаются — используйте вложенный
+> синтаксис из примера выше.
+
+`auth.jwt_secret` обязателен: задайте его в файле конфигурации или экспортируйте
+`BOND_AUTH__JWT_SECRET`. `load_settings()` возбуждает `ConfigError`, если
+конфигурация невалидна или YAML-файл повреждён.
+
+## База данных
+
+Слой работы с БД живёт в `bond_accounting.db` (`src/bond_accounting/db/`):
+
+- `Base`, `User`, `Bond`, `Transaction` — модели SQLAlchemy 2.0
+  (`Mapped`/`mapped_column`) с CHECK-ограничениями на `transactions.type`
+  (`BUY`/`SELL`/`MATURE`) и `bonds.coupon_frequency`
+  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+- `create_engine_from_settings(db_config)` — фабрика async-движка
+  (`create_async_engine`); прагмы SQLite применяются через слушатель события
+  `connect` (см. выше).
+- `create_session_factory(engine)` — фабрика `AsyncSession` с
+  `expire_on_commit=False`.
+
+Позиция по облигации нигде не хранится: она всегда вычисляется как
+`sum(BUY.quantity) - sum(SELL.quantity) - sum(MATURE.quantity)`.
+
+Приложение никогда не создаёт таблицы само (`Base.metadata.create_all` не
+используется): схема управляется исключительно миграциями
+[Alembic](https://alembic.sqlalchemy.org/) в `alembic/versions/`. URL миграций
+**не** хранится в `alembic.ini` — `alembic/env.py` строит async-движок из
+конфигурации приложения (`config.yaml` или переменных `BOND_*`), поэтому
+миграции применяются ровно к той базе, с которой работает приложение:
+
+```bash
+uv run alembic revision --autogenerate -m "<description>"  # создать миграцию
+uv run alembic upgrade head                              # применить все миграции
+uv run alembic downgrade -1                              # откатить одну ревизию
+uv run alembic downgrade base                            # откатить всё
+```
+
+Пример — применить миграции к конкретному SQLite-файлу, не меняя конфиг
+(запускать из корня проекта, чтобы `config.yaml` предоставил `auth.jwt_secret`,
+либо экспортировать `BOND_AUTH__JWT_SECRET`):
+
+```bash
+BOND_DATABASE__SQLITE_PATH=/tmp/new.db uv run alembic upgrade head
+```
+
+## Структура проекта
+
+```
+src/bond_accounting/
+  main.py         # точка входа: композиция, запуск, graceful shutdown
+  config/         # настройки: Pydantic + YAML + env, логирование
+  db/             # модели SQLAlchemy 2.0, engine/фабрика сессий
+  event_bus/      # внутренняя событийная шина (pub/sub, request/response)
+  auth/           # JWT-аутентификация, хеширование паролей (bcrypt)
+  bonds/          # облигации: CRUD-сервис с публикацией в event bus
+  portfolio/      # портфель: сделки, позиции, неттинг
+  yield_calc/     # доходности: YTM, текущая, НКД, график купонов
+  analytics/      # метрики портфеля и отчёты (подписана на event bus)
+  ui/             # веб-интерфейс на NiceGUI (логин, облигации, сделки, портфель, аналитика)
+  api/            # публичный REST API (FastAPI)
+  external_bus/   # интеграция с внешней шиной событий (зарезервировано)
+alembic/          # миграции Alembic (async env.py)
+alembic.ini       # конфигурация Alembic (без URL базы данных)
+tests/            # тесты (слои: unit, integration, api, functional, ui)
+config.yaml       # пример конфигурации
+data/             # файлы SQLite (runtime)
+```
+
+Проект использует стандартный `src/`-layout для uv: код приложения лежит в
+`src/bond_accounting/`.
+
+## Разработка
+
+```bash
+uv sync --all-extras --group dev                # runtime- и dev-зависимости
+uv run pytest -q                                # все тесты, одной командой
+uv run ruff check .                             # линтер
+uv run mypy src                                 # проверка типов
+```
+
+Тесты запускаются одной командой `uv run pytest -q` — все слои сразу:
+unit, integration, api, functional и ui. Структура тестов слоистая:
+
+- `tests/unit/` — юнит-тесты (изолированные компоненты),
+- `tests/integration/` — интеграционные тесты (компоненты вместе, БД),
+- `tests/api/` — тесты REST API,
+- `tests/functional/` — функциональные тесты (сценарии целиком),
+- `tests/ui/` — тесты веб-интерфейса (симуляция пользователя NiceGUI),
+- `tests/conftest.py` — общий стек фикстур для всех слоёв,
+- `tests/rest_utils.py` — общие константы и хелперы REST-тестов
+  (используются слоями `api` и `functional`).
+
+## Покрытие тестами
+
+```bash
+uv run pytest -q --cov=bond_accounting --cov-report=term-missing
+```
+
+Команда запускает все тесты с замером покрытия (`pytest-cov` входит в
+dev-зависимости `pyproject.toml`). Добавьте `--cov-report=html`, чтобы
+получить открываемый в браузере HTML-отчёт в `htmlcov/`. Текущее покрытие
+по строкам — около 92%
+(точка входа `main.py` не покрывается тестами: она проверяется фактическим
+запуском приложения; без неё — около 97%).
+
+## Качество кода
+
+В проекте используются четыре линтера/тайпчекера, все запускаются через `uv`.
+Ruff и mypy — обязательные гейты (CI должен проходить); `ty` и `pyrefly` —
+дополнительные тайпчекеры, находки которых сейчас разбираются, они пока
+не блокирующие.
+
+| Инструмент | Назначение | Команда |
+| --- | --- | --- |
+| [Ruff](https://docs.astral.sh/ruff/) | Линтер + форматтер | `uv run ruff check .` |
+| | | `uv run ruff format --check .` |
+| [mypy](https://mypy-lang.org/) | Тайпчекер (гейт) | `uv run mypy src` |
+| [ty](https://docs.astral.sh/ty/) | Тайпчекер (Astral) | `uv run ty check src tests` |
+| [Pyrefly](https://pyrefly.org/) | Тайпчекер (Meta) | `uv run pyrefly check --min-severity warn` |
+
+> **Примечание о счётчике «suppressed» в pyrefly:** в сводке строка
+> `N suppressed` не равна числу реально скрытых диагностик — директивы
+> подавления могут давать «фантомные» единицы. Чтобы увидеть, что реально
+> подавлено, выполните
+> `uv run pyrefly check --enabled-ignores pyre --min-severity ignore --output-format json`.
+
+Конфигурация живёт в `pyproject.toml`: `[tool.ruff]`, `[tool.mypy]`,
+`[tool.ty]` и `[tool.pyrefly]`. `ty` проверяет `src/` и `tests/`
+(`[tool.ty.src] include`); `pyrefly` работает в режиме проекта и подхватывает
+`[tool.pyrefly]` (включает `src/**` и `tests/**`).
+
+> Примечание: по умолчанию `pyrefly check` скрывает предупреждения — чтобы их
+> увидеть, используйте `--min-severity warn`.
+
+Запустить всё сразу:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+uv run ty check src tests
+uv run pyrefly check --min-severity warn
+uv run pytest -q
+```

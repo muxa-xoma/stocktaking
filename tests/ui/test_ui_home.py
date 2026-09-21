@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from tests._ui_utils import authenticate, tables
+from tests.ui._ui_utils import (
+    authenticate,
+    tables,
+)
 
 
 async def test_home_page_renders_empty(

@@ -7,7 +7,7 @@ from datetime import date
 from nicegui import ui
 
 from bond_accounting.analytics.dto import Cashflow
-from tests._ui_utils import (
+from tests.ui._ui_utils import (
     authenticate,
     click,
     eventually,

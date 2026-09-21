@@ -3,30 +3,39 @@
 from __future__ import annotations
 
 import os
-import re
-import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import create_autospec
 
 import httpx
 import pytest
-from nicegui import Client, core, ui
-from nicegui.functions.download import download
-from nicegui.functions.navigate import Navigate
-from nicegui.functions.notify import notify
-from nicegui.testing import User
-from nicegui.testing.general import nicegui_reset_globals, prepare_simulation
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from fastapi import FastAPI
 
-from bond_accounting.analytics.service import AnalyticsService
-from bond_accounting.auth.jwt_service import JwtService
-from bond_accounting.auth.service import AuthService
+from bond_accounting.analytics import AnalyticsService
+from bond_accounting.api import api_router, build_api_dependencies, register_exception_handlers
+from bond_accounting.auth import AuthService, JwtService, PasswordHasher
 from bond_accounting.bonds.service import BondService
-from bond_accounting.config.settings import ENV_PREFIX, AuthConfig
-from bond_accounting.portfolio.service import PortfolioService
-from bond_accounting.ui import create_ui_app
+from bond_accounting.config.settings import ENV_PREFIX, AuthConfig, DatabaseConfig, EventBusConfig
+from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
+from bond_accounting.event_bus import AsyncQueueEventBus
+from bond_accounting.portfolio import PortfolioService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: Project root (where ``alembic.ini`` lives).
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+#: JWT-секрет, используемый только UI-тестами.
+#: Фиктивный, но длинный (≥32 байта): короткие HMAC-ключи триггерят
+#: ``InsecureKeyLengthWarning`` в PyJWT (RFC 7518 Section 3.2).
+UI_JWT_SECRET = "ui-test-jwt-secret-0123456789abcdef0123456789abcdef"
+
+#: JWT-секрет REST-стека фикстур (см. ``jwt_secret``).
+REST_JWT_SECRET = "rest-test-jwt-secret-0123456789abcdef0123456789"
 
 
 @pytest.fixture(autouse=True)
@@ -38,18 +47,6 @@ def _clean_bond_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith(ENV_PREFIX):
             monkeypatch.delenv(name)
-
-
-# --------------------------------------------------------------------------- #
-# NiceGUI user-simulation fixtures (see https://nicegui.io/documentation/user_simulation)
-# --------------------------------------------------------------------------- #
-
-#: JWT-секрет, используемый только UI-тестами.
-UI_JWT_SECRET = "test-secret"
-
-#: Шаблоны JS-команд установки/сброса cookie из ``ui/common.py``.
-_SET_COOKIE_JS = re.compile(r'document\.cookie = "token=([^;"]+)')
-_CLEAR_COOKIE_JS = re.compile(r'document\.cookie = "token=;')
 
 
 @pytest.fixture
@@ -64,157 +61,99 @@ def jwt_service(auth_config: AuthConfig) -> JwtService:
     return JwtService(auth_config)
 
 
-@pytest.fixture
-def valid_token(jwt_service: JwtService) -> str:
-    """Валидный JWT пользователя alice (user_id=1)."""
-    return jwt_service.create_token(user_id=1, username="alice")
+# --------------------------------------------------------------------------- #
+# REST API fixture stack (migrated temp DB + event bus + FastAPI app + client)
+# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture
-def auth_service() -> AuthService:
-    """Мок сервиса аутентификации (register/login — AsyncMock)."""
-    return create_autospec(AuthService, instance=True)
+def jwt_secret() -> str:
+    """JWT secret shared by the REST fixture stack; override to vary per module.
 
-
-@pytest.fixture
-def bond_service() -> BondService:
-    """Мок CRUD-сервиса облигаций."""
-    return create_autospec(BondService, instance=True)
-
-
-@pytest.fixture
-def portfolio_service() -> PortfolioService:
-    """Мок сервиса сделок и позиций."""
-    return create_autospec(PortfolioService, instance=True)
-
-
-@pytest.fixture
-def analytics_service() -> AnalyticsService:
-    """Мок сервиса аналитики."""
-    return create_autospec(AnalyticsService, instance=True)
-
-
-class SimUser(User):
-    """``User`` с фиксой для fire-and-forget ``run_javascript``.
-
-    В production-коде cookie выставляются через ``ui.run_javascript(...)`` без
-    await; такие сообщения не содержат ``request_id``, и стандартный
-    ``simulated_emit`` из nicegui падает с ``KeyError`` *до* применения
-    ``javascript_rules`` (порядок вычисления аргументов словаря). Здесь
-    отсутствующий ``request_id`` заменяется случайным — ``JavaScriptRequest.resolve``
-    просто игнорирует неизвестный id.
+    Fake, but ≥32 bytes: shorter HMAC keys trigger PyJWT's
+    ``InsecureKeyLengthWarning`` (RFC 7518 Section 3.2).
     """
-
-    def _patch_outbox_emit_function(self) -> None:
-        original_emit = self._client.outbox._emit
-
-        async def simulated_emit(message: tuple) -> None:
-            await original_emit(message)
-            _, type_, data = message
-            if type_ == "run_javascript":
-                for rule, result in self.javascript_rules.items():
-                    match = rule.match(data["code"])
-                    if match:
-                        self._client.handle_javascript_response(
-                            {
-                                "request_id": data.get("request_id", str(uuid.uuid4())),
-                                "result": result(match),
-                            }
-                        )
-
-        self._client.outbox._emit = simulated_emit  # type: ignore[method-assign]
-
-
-def _install_cookie_rules(user: SimUser) -> None:
-    """Перехватить ``document.cookie`` из симуляции в cookies HTTP-клиента.
-
-    ``set_token_cookie``/``clear_token_cookie`` выставляют cookie через
-    ``ui.run_javascript``; в user simulation эти команды перехватываются
-    через ``user.javascript_rules`` и применяются к httpx-клиенту, чтобы
-    последующая навигация видела cookie как настоящий браузер.
-    """
-
-    def capture_set(match: re.Match) -> bool:
-        user.http_client.cookies.set("token", match.group(1))
-        return True
-
-    def capture_clear(match: re.Match) -> bool:
-        user.http_client.cookies.delete("token")
-        return True
-
-    user.javascript_rules[_SET_COOKIE_JS] = capture_set
-    user.javascript_rules[_CLEAR_COOKIE_JS] = capture_clear
-
-
-def _patch_run_javascript(user: SimUser) -> Callable[[], None]:
-    """Применять ``javascript_rules`` синхронно в ``Client.run_javascript``.
-
-    В симуляции ``ui.navigate.to`` открывает страницу через HTTP-запрос из
-    отдельной фоновой задачи, которая может опередить цикл outbox. В реальном
-    браузере сообщения websocket обрабатываются по порядку, поэтому cookie
-    всегда виден навигации. Здесь это поведение воспроизводится: правила
-    (установка/сброс cookie) применяются сразу в момент вызова.
-    """
-    original = Client.run_javascript
-
-    def run_javascript_with_rules(self: Client, code: str, *, timeout: float = 1.0):
-        response = original(self, code, timeout=timeout)
-        for rule, result in user.javascript_rules.items():
-            match = rule.match(code)
-            if match:
-                result(match)
-        return response
-
-    Client.run_javascript = run_javascript_with_rules  # type: ignore[method-assign]
-
-    def restore_run_javascript() -> None:
-        Client.run_javascript = original  # type: ignore[method-assign]  # restore the original method
-
-    return restore_run_javascript
+    return REST_JWT_SECRET
 
 
 @pytest.fixture
-async def ui_user(
-    jwt_service: JwtService,
-    auth_service: AuthService,
-    bond_service: BondService,
-    portfolio_service: PortfolioService,
-    analytics_service: AnalyticsService,
-) -> AsyncGenerator[SimUser]:
-    """Пользователь NiceGUI user simulation: реальный UI + моки сервисов.
+def db_filename() -> str:
+    """SQLite filename inside ``tmp_path``; override to vary per module."""
+    return "test.db"
 
-    Точно повторяет ``nicegui.testing.user_simulation`` (сброс глобального
-    состояния, ``prepare_simulation``, lifespan), но вместо main-файла
-    регистрирует страницы через ``create_ui_app`` с мок-сервисами.
+
+@pytest.fixture
+def migrated_db_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db_filename: str,
+    jwt_secret: str,
+) -> str:
+    """Create an empty migrated SQLite DB via alembic; return its file path."""
+    db_path = tmp_path / db_filename
+    monkeypatch.setenv("BOND_DATABASE__SQLITE_PATH", str(db_path))
+    monkeypatch.setenv("BOND_AUTH__JWT_SECRET", jwt_secret)
+    alembic_cfg = AlembicConfig(str(PROJECT_ROOT / "alembic.ini"))
+    command.upgrade(alembic_cfg, "head")
+    return str(db_path)
+
+
+@pytest.fixture
+async def session_factory(
+    migrated_db_url: str,
+) -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
+    """Async session factory bound to the migrated temp database."""
+    engine = create_engine_from_settings(DatabaseConfig(sqlite_path=migrated_db_url))
+    factory = create_session_factory(engine)
+    yield factory
+    await engine.dispose()
+
+
+@pytest.fixture
+async def event_bus() -> AsyncGenerator[AsyncQueueEventBus]:
+    """A started event bus, stopped after the test."""
+    bus = AsyncQueueEventBus(EventBusConfig(max_queue_size=100))
+    await bus.start()
+    yield bus
+    await bus.stop()
+
+
+@pytest.fixture
+def app(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_bus: AsyncQueueEventBus,
+    jwt_secret: str,
+) -> FastAPI:
+    """The API application assembled like ``main.py``, with real services.
+
+    A plain ``FastAPI()`` instance (instead of ``nicegui.app``): the router is
+    included, domain exception handlers are registered, and real services are
+    wired in through ``build_api_dependencies``.
     """
-    user: SimUser | None = None
-    restore_run_javascript: Callable[[], None] | None = None
-    with nicegui_reset_globals():
-        os.environ["NICEGUI_USER_SIMULATION"] = "true"
-        try:
-            prepare_simulation()
-            ui.run(storage_secret="simulated secret")
-            create_ui_app(
-                auth_service=auth_service,
-                jwt_service=jwt_service,
-                bond_service=bond_service,
-                portfolio_service=portfolio_service,
-                analytics_service=analytics_service,
-            )
-            async with (
-                core.app.router.lifespan_context(core.app),
-                httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=core.app), base_url="http://test"
-                ) as client,
-            ):
-                user = SimUser(client)
-                _install_cookie_rules(user)
-                restore_run_javascript = _patch_run_javascript(user)
-                yield user
-        finally:
-            if restore_run_javascript is not None:
-                restore_run_javascript()
-            os.environ.pop("NICEGUI_USER_SIMULATION", None)
-            ui.navigate = Navigate()
-            ui.notify = notify
-            ui.download = download
+    jwt_service = JwtService(AuthConfig(jwt_secret=jwt_secret))
+    auth_service = AuthService(session_factory, PasswordHasher(), jwt_service)
+    bond_service = BondService(session_factory, event_bus)
+    portfolio_service = PortfolioService(session_factory, event_bus)
+    analytics_service = AnalyticsService(session_factory, event_bus)
+
+    application = FastAPI()
+    application.include_router(api_router)
+    register_exception_handlers(application)
+    application.dependency_overrides.update(
+        build_api_dependencies(
+            auth_service,
+            jwt_service,
+            bond_service,
+            portfolio_service,
+            analytics_service,
+        ).overrides()
+    )
+    return application
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncGenerator[httpx.AsyncClient]:
+    """An httpx client talking to the app in-process, without a socket."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        yield async_client

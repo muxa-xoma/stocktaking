@@ -18,6 +18,8 @@ from bond_accounting.ui.common import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bond_accounting.auth.jwt_service import JwtService
     from bond_accounting.bonds.service import BondService
 
@@ -45,7 +47,7 @@ _COLUMNS: list[dict[str, Any]] = [
     {"name": "issuer", "label": "Эмитент", "field": "issuer", "align": "left"},
 ]
 
-_ISIN_RULES = {
+_ISIN_RULES: dict[str, Callable[[Any], bool]] = {
     "ISIN — ровно 12 символов (A-Z, 0-9)": lambda value: _is_valid_isin(value),
 }
 

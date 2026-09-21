@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from bond_accounting.auth.service import AuthError
-from tests._ui_utils import eventually
+from tests.ui._ui_utils import (
+    eventually,
+)
 
 
 async def test_login_page_renders(ui_user) -> None:

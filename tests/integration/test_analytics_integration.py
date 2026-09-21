@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from bond_accounting.portfolio.dto import TransactionType
 
 #: Project root (where ``alembic.ini`` lives).
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 #: How long to wait for async event delivery before failing a test.
 _EVENT_TIMEOUT = 2.0

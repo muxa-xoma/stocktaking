@@ -95,9 +95,12 @@ exclude = [".agents", "data"]
 [tool.ty.environment]
 python = ".venv"
 python-version = "3.14"
-root = ["src"]
+# "." is included so ty can resolve tests.* imports (layered test structure)
+root = ["src", "."]
 
 [tool.pyrefly]
 project-includes = ["src/**", "tests/**"]
 project-excludes = [".agents/**", "data/**"]
 python-version = "3.14"
+# "." is included so pyrefly can resolve tests.* imports (layered test structure)
+search-path = ["src", "."]

@@ -5,7 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from bond_accounting.portfolio.service import PortfolioError
-from tests._ui_utils import (
+from tests.ui._ui_utils import (
     authenticate,
     click,
     eventually,
