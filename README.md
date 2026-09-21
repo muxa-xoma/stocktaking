@@ -139,10 +139,12 @@ configuration is invalid or the YAML file is malformed.
 
 The database layer lives in `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction` — SQLAlchemy 2.0 models
-  (`Mapped`/`mapped_column`), with CHECK constraints on `transactions.type`
-  (`BUY`/`SELL`/`MATURE`) and `bonds.coupon_frequency`
-  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount` —
+  SQLAlchemy 2.0 models (`Mapped`/`mapped_column`), with CHECK constraints
+  on `transactions.type` (`BUY`/`SELL`/`MATURE`) and `bonds.coupon_frequency`
+  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`). `Broker.commission`/`min_commission`
+  are stored as **percent** (5.0 = 5%); `BrokerAccount.broker_id` is
+  mandatory (NOT NULL).
 - `create_engine_from_settings(db_config)` — async engine factory
   (`create_async_engine`); SQLite pragmas are applied via a `connect` event
   listener (see above).
@@ -185,6 +187,7 @@ src/
     event_bus/    # in-process async event bus
     auth/         # JWT auth: password hashing, token issue/verify, service
     bonds/        # bond instruments CRUD
+    brokers/      # broker & broker-account CRUD
     portfolio/    # portfolio management, position netting
     yield_calc/   # yield calculations (accrued coupon, current yield, YTM)
     analytics/    # analytics (subscribed to the event bus)

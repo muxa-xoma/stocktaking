@@ -146,10 +146,12 @@ BOND_LOGGING__FORMAT="text"
 
 Слой работы с БД живёт в `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction` — модели SQLAlchemy 2.0
-  (`Mapped`/`mapped_column`) с CHECK-ограничениями на `transactions.type`
-  (`BUY`/`SELL`/`MATURE`) и `bonds.coupon_frequency`
-  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount` — модели
+  SQLAlchemy 2.0 (`Mapped`/`mapped_column`) с CHECK-ограничениями на
+  `transactions.type` (`BUY`/`SELL`/`MATURE`) и `bonds.coupon_frequency`
+  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`). `Broker.commission`/`min_commission`
+  хранятся в **процентах** (5.0 = 5%); `BrokerAccount.broker_id` —
+  обязательное поле (NOT NULL).
 - `create_engine_from_settings(db_config)` — фабрика async-движка
   (`create_async_engine`); прагмы SQLite применяются через слушатель события
   `connect` (см. выше).
@@ -191,6 +193,7 @@ src/bond_accounting/
   event_bus/      # внутренняя событийная шина (pub/sub, request/response)
   auth/           # JWT-аутентификация, хеширование паролей (bcrypt)
   bonds/          # облигации: CRUD-сервис с публикацией в event bus
+  brokers/        # брокеры и брокерские счета: CRUD-сервис
   portfolio/      # портфель: сделки, позиции, неттинг
   yield_calc/     # доходности: YTM, текущая, НКД, график купонов
   analytics/      # метрики портфеля и отчёты (подписана на event bus)
