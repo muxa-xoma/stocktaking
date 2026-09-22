@@ -71,7 +71,7 @@ def test_message_requires_topic_and_sender() -> None:
 
 
 def test_all_topics_registry() -> None:
-    assert len(ALL_TOPICS) == 12
+    assert len(ALL_TOPICS) == 14
     for name in (
         Topic.BOND_CREATED,
         Topic.BOND_UPDATED,
@@ -83,6 +83,8 @@ def test_all_topics_registry() -> None:
         Topic.BROKER_ACCOUNT_UPDATED,
         Topic.BROKER_ACCOUNT_DELETED,
         Topic.TRANSACTION_CREATED,
+        Topic.TRANSACTION_UPDATED,
+        Topic.TRANSACTION_DELETED,
         Topic.POSITION_UPDATED,
         Topic.PORTFOLIO_RECALCULATED,
     ):

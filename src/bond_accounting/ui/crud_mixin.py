@@ -1,7 +1,7 @@
 """Generic CRUD mixin for NiceGUI справочник-страниц.
 
-Выносит повторяющийся CRUD-сценарий справочника (таблица + форма создания +
-форма правки/удаления выбранной записи) в переиспользуемый
+Выносит повторяющийся CRUD-сценарий справочника (таблица + модальные окна
+создания, правки и подтверждения удаления) в переиспользуемый
 :class:`CrudPageMixin`. Конкретная страница:
 
 * объявляет 11 ``ClassVar``-полей с морфологией сообщений (``entity_title``
@@ -17,11 +17,21 @@
 экземпляра страницы.
 
 Структура state-объекта описана Протоколом :class:`CrudState` (поля ``cache``,
-``selected_id``, ``table``, ``selected_label``, ``delete_dialog``), а сам миксин
-параметризован типом state-объекта ``StateT``. Конкретная страница не
-указывает generic-параметр явно — mypy выводит его из сигнатур абстрактных
-хуков, которые принимают конкретный дата-класс (duck-typing, структурно
-совместимый с ``CrudState``).
+``selected_id``, ``table``, ``create_dialog``, ``edit_dialog``,
+``confirm_delete_dialog``), а сам миксин параметризован типом state-объекта
+``StateT``. Конкретная страница не указывает generic-параметр явно — mypy
+выводит его из сигнатур абстрактных хуков, которые принимают конкретный
+дата-класс (duck-typing, структурно совместимый с ``CrudState``).
+
+Сценарий:
+
+* кнопка «Добавить» открывает ``state.create_dialog``; кнопка «Готово»
+  вызывает :meth:`_handle_create` (закрывает окно при успехе);
+* клик по строке таблицы (``table.on('rowClick', ...)``) заполняет форму
+  правки через :meth:`_fill_edit_form` и открывает ``state.edit_dialog``;
+* кнопка «Удалить» в окне правки закрывает его и открывает
+  ``state.confirm_delete_dialog``; кнопка «Да» вызывает
+  :meth:`_confirm_delete`.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ from typing import Any, ClassVar, Protocol
 from nicegui import ui
 from pydantic import ValidationError
 
-from bond_accounting.ui.common import notify_error
+from bond_accounting.ui.common import notify_error, row_from_event
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +54,9 @@ class CrudState(Protocol):
     cache: dict[int, Any]
     selected_id: int | None
     table: Any
-    selected_label: Any
-    delete_dialog: Any
+    create_dialog: Any
+    edit_dialog: Any
+    confirm_delete_dialog: Any
 
 
 class CrudPageMixin[StateT: CrudState](ABC):
@@ -146,22 +157,19 @@ class CrudPageMixin[StateT: CrudState](ABC):
             return
         state.selected_id = None
         state.table.selected = []
-        state.selected_label.set_text(self.no_selection_text)
 
     def _on_table_select(self, state: StateT, e: Any) -> None:
-        """Заполнить форму правки при выборе строки таблицы."""
-        selection = e.selection
-        if not selection:
-            state.selected_id = None
+        """Заполнить форму правки и открыть модальное окно при клике по строке."""
+        row_key = state.table.row_key
+        row = row_from_event(e, row_key)
+        if row is None:
             return
-        row = selection[0]
-        entity = state.cache.get(row["id"])
+        entity = state.cache.get(row[row_key])
         if entity is None:
-            state.selected_id = None
             return
         state.selected_id = entity.id
-        state.selected_label.set_text(f"{self.selected_verb} {self._entity_caption(entity)}")
         self._fill_edit_form(state, entity)
+        state.edit_dialog.open()
 
     async def _handle_create(self, state: StateT) -> None:
         """Создать запись справочника из формы создания."""
@@ -182,7 +190,18 @@ class CrudPageMixin[StateT: CrudState](ABC):
             f"{self.entity_title} {self._entity_name(entity)} {self.created_suffix}",
             type="positive",
         )
+        state.create_dialog.close()
         await self._reload(state)
+
+    @abstractmethod
+    def _reset_create_form(self, state: StateT) -> None:
+        """Hook: reset create form widgets to defaults. Override in subclasses."""
+        pass
+
+    def _open_create_dialog(self, state: StateT) -> None:
+        """Open create dialog after resetting fields."""
+        self._reset_create_form(state)
+        state.create_dialog.open()
 
     async def _handle_update(self, state: StateT) -> None:
         """Сохранить изменения выбранной записи."""
@@ -210,24 +229,30 @@ class CrudPageMixin[StateT: CrudState](ABC):
             f"{self.entity_title} {self._entity_name(updated)} {self.updated_suffix}",
             type="positive",
         )
+        state.edit_dialog.close()
         await self._reload(state)
 
     def _handle_delete(self, state: StateT) -> None:
-        """Открыть подтверждение удаления выбранной записи."""
+        """Закрыть окно правки и открыть подтверждение удаления записи."""
         if state.selected_id is None:
             ui.notify(f"Сначала выберите {self.entity_accusative} в таблице", type="warning")
             return
-        state.delete_dialog.open()
+        state.edit_dialog.close()
+        state.confirm_delete_dialog.open()
 
     async def _confirm_delete(self, state: StateT) -> None:
         """Удалить выбранную запись после подтверждения."""
-        state.delete_dialog.close()
+        state.confirm_delete_dialog.close()
         if state.selected_id is None:
             return
         try:
             deleted = await self._service_delete(state, state.selected_id)
         except self.delete_guard_error as exc:
             ui.notify(f"Нельзя удалить {self.entity_accusative}: {exc}", type="negative")
+            entity = state.cache.get(state.selected_id)
+            if entity is not None:
+                self._fill_edit_form(state, entity)
+                state.edit_dialog.open()
             return
         except Exception as exc:
             notify_error(exc)

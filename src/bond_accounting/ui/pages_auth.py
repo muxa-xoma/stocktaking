@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from nicegui import ui
 
 from bond_accounting.auth.service import AuthError
-from bond_accounting.ui.common import notify_error, set_token_cookie
+from bond_accounting.ui.common import apply_dark_theme, notify_error, set_token_cookie
 
 if TYPE_CHECKING:
     from bond_accounting.auth.jwt_service import JwtService
@@ -70,6 +70,9 @@ class LoginPage:
 
     async def render(self) -> None:
         """Отрисовать форму входа: логин, пароль, переход в портфель."""
+        # Страницы без page_header не получают тёмную палитру из общей
+        # шапки, поэтому включаем Dark-режим и CSS «Глубокой ночи» отдельно.
+        apply_dark_theme()
         with ui.card().classes("mx-auto mt-16 w-80"):
             ui.label("Вход").classes("text-h5")
             username = ui.input("Логин").classes("w-full")
@@ -121,6 +124,8 @@ class RegisterPage:
 
     async def render(self) -> None:
         """Отрисовать форму регистрации: логин, пароль и подтверждение пароля."""
+        # Как и на /login: полная тёмная палитра без общей шапки.
+        apply_dark_theme()
         with ui.card().classes("mx-auto mt-16 w-80"):
             ui.label("Регистрация").classes("text-h5")
             username = ui.input("Логин").classes("w-full")

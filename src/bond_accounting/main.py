@@ -7,8 +7,8 @@ This is the single place where all modules of the application are assembled:
 2. Create the async engine and session factory, then apply Alembic
    migrations (``upgrade head``).
 3. Start the in-process event bus.
-4. Build the services (auth, bonds, brokers, portfolio, analytics) and
-   subscribe the analytics service to the bus.
+4. Build the services (auth, bonds, brokers, portfolio, analytics, account
+   operations) and subscribe the analytics service to the bus.
 5. Register the NiceGUI pages and mount the REST API.
 6. Serve UI and REST on a single port; stop gracefully on SIGINT/SIGTERM.
 
@@ -53,6 +53,7 @@ from nicegui import ui
 # Private on purpose: the only way to make alembic/env.py's load_settings()
 # see the --config path without modifying env.py (see module docstring).
 import bond_accounting.config.settings as settings_module
+from bond_accounting.account_operations.service import AccountOperationService
 from bond_accounting.analytics import AnalyticsService, attach_to_event_bus
 from bond_accounting.api import api_router, build_api_dependencies, register_exception_handlers
 from bond_accounting.auth import AuthService, JwtService, PasswordHasher
@@ -153,6 +154,7 @@ async def main(config_path: str | None = None) -> None:
             broker_service = BrokerService(session_factory, event_bus)
             portfolio_service = PortfolioService(session_factory, event_bus)
             analytics_service = AnalyticsService(session_factory, event_bus)
+            account_operation_service = AccountOperationService(session_factory)
             attach_to_event_bus(analytics_service, event_bus)
 
             create_ui_app(
@@ -162,6 +164,7 @@ async def main(config_path: str | None = None) -> None:
                 broker_service,
                 portfolio_service,
                 analytics_service,
+                account_operation_service,
             )
 
             api_dependencies = build_api_dependencies(
@@ -171,6 +174,7 @@ async def main(config_path: str | None = None) -> None:
                 broker_service,
                 portfolio_service,
                 analytics_service,
+                account_operation_service=account_operation_service,
             )
             nicegui_app.include_router(api_router)
             register_exception_handlers(nicegui_app)
@@ -194,7 +198,7 @@ async def main(config_path: str | None = None) -> None:
                     ui.run,
                     host=settings.app.host,
                     port=settings.app.port,
-                    title="Bond Accounting",
+                    title="Home Stocktaking",
                     fastapi_docs=True,
                     reload=False,
                     show=False,

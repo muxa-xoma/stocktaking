@@ -1,6 +1,6 @@
 """REST API router for the bond accounting service.
 
-Exposes 22 endpoints under the ``/api`` prefix. All services arrive
+Exposes 30 endpoints under the ``/api`` prefix. All services arrive
 through FastAPI dependencies (see :mod:`bond_accounting.api.deps`); the
 router never constructs services or the application itself — the app is
 assembled in ``main.py`` which mounts :data:`api_router`.
@@ -18,6 +18,17 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from bond_accounting.account_operations.dto import (
+    AccountOperationCreate,
+    AccountOperationDTO,
+    AccountOperationUpdate,
+)
+from bond_accounting.account_operations.exceptions import (
+    AccountOperationForbiddenError,
+)
+from bond_accounting.account_operations.service import (  # noqa: TC001
+    AccountOperationService,
+)
 from bond_accounting.analytics.dto import (
     PortfolioQueryParams,
     PortfolioSummary,
@@ -28,6 +39,7 @@ from bond_accounting.analytics.dto import (
 # annotations with get_type_hints() at route-registration time.
 from bond_accounting.analytics.service import AnalyticsService  # noqa: TC001
 from bond_accounting.api.deps import (
+    get_account_operation_service,
     get_analytics_service,
     get_auth_service,
     get_bond_service,
@@ -52,6 +64,7 @@ from bond_accounting.brokers.dto import (
     BrokerDTO,
     BrokerUpdate,
 )
+from bond_accounting.brokers.exceptions import BrokerAccountHasOperationsError
 from bond_accounting.brokers.service import (
     BrokerAccountHasTransactionsError,
     BrokerAccountNotFoundError,
@@ -60,11 +73,17 @@ from bond_accounting.brokers.service import (
     BrokerNotFoundError,
     BrokerService,
 )
-from bond_accounting.portfolio.dto import PositionDTO, TransactionCreate, TransactionDTO
+from bond_accounting.portfolio.dto import (
+    PositionDTO,
+    TransactionCreate,
+    TransactionDTO,
+    TransactionUpdate,
+)
 from bond_accounting.portfolio.service import (
     InsufficientPositionError,
     InvalidTransactionError,
     PortfolioService,
+    TransactionForbiddenError,
 )
 
 if TYPE_CHECKING:
@@ -117,7 +136,16 @@ class BrokerCreateRequest(BaseModel):
     name: str
     commission: float = Field(ge=0, default=0.0, description="Commission percent (e.g. 5.0 = 5%).")
     min_commission: float | None = Field(
-        default=None, ge=0, description="Minimum commission percent."
+        default=None,
+        ge=0,
+        description=(
+            "Optional minimum commission (percent or fixed rubles depending on "
+            "min_commission_type)."
+        ),
+    )
+    min_commission_type: Literal["PERCENT", "RUBLES"] = Field(
+        default="PERCENT",
+        description="Interpretation of min_commission: percent or fixed rubles.",
     )
     description: str | None = None
 
@@ -130,7 +158,15 @@ class BrokerUpdateRequest(BaseModel):
         default=None, ge=0, description="Commission percent (e.g. 5.0 = 5%)."
     )
     min_commission: float | None = Field(
-        default=None, ge=0, description="Minimum commission percent."
+        default=None,
+        ge=0,
+        description=(
+            "Minimum commission (percent or fixed rubles depending on min_commission_type)."
+        ),
+    )
+    min_commission_type: Literal["PERCENT", "RUBLES"] | None = Field(
+        default=None,
+        description="Interpretation of min_commission: percent or fixed rubles.",
     )
     description: str | None = None
 
@@ -511,6 +547,188 @@ async def create_transaction(
     return await portfolio_service.add_transaction(user_id, data)
 
 
+@api_router.get("/transactions/{transaction_id}", response_model=TransactionDTO)
+async def get_transaction(
+    transaction_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    portfolio_service: Annotated[PortfolioService, Depends(get_portfolio_service)],
+) -> TransactionDTO:
+    """Fetch one transaction.
+
+    Raises:
+        HTTPException: 404 when no transaction with this id exists; 403 when it
+            is owned by another user (mapped by
+            :func:`register_exception_handlers`).
+    """
+    transaction = await portfolio_service.get_transaction(transaction_id, user_id)
+    if transaction is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction {transaction_id} not found",
+        )
+    return transaction
+
+
+@api_router.put("/transactions/{transaction_id}", response_model=TransactionDTO)
+async def update_transaction(
+    transaction_id: int,
+    data: TransactionUpdate,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    portfolio_service: Annotated[PortfolioService, Depends(get_portfolio_service)],
+) -> TransactionDTO:
+    """Partially update a transaction (``None``/omitted fields unchanged).
+
+    Raises:
+        HTTPException: 404 when no transaction with this id exists; 403 when
+            it is owned by another user; 422 when the update would drive a
+            position below zero; 400 when it is rejected (e.g. unknown bond
+            or broker account) — all mapped by
+            :func:`register_exception_handlers`.
+    """
+    updated = await portfolio_service.update_transaction(transaction_id, data, user_id)
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction {transaction_id} not found",
+        )
+    return updated
+
+
+@api_router.delete("/transactions/{transaction_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_transaction(
+    transaction_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    portfolio_service: Annotated[PortfolioService, Depends(get_portfolio_service)],
+) -> None:
+    """Delete a transaction.
+
+    Raises:
+        HTTPException: 404 when no transaction with this id exists; 403 when
+            it is owned by another user; 422 when deleting it would drive a
+            position below zero (e.g. the bought bonds were already sold) —
+            all mapped by :func:`register_exception_handlers`.
+    """
+    deleted = await portfolio_service.delete_transaction(transaction_id, user_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction {transaction_id} not found",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# account-operation endpoints (bearer auth)
+# --------------------------------------------------------------------------- #
+
+
+@api_router.get("/account-operations", response_model=list[AccountOperationDTO])
+async def list_account_operations(
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    account_operation_service: Annotated[
+        AccountOperationService, Depends(get_account_operation_service)
+    ],
+    broker_account_id: int | None = None,
+) -> list[AccountOperationDTO]:
+    """List the caller's account operations, optionally filtered by broker account."""
+    if broker_account_id is not None:
+        return await account_operation_service.list_for_account(broker_account_id, user_id)
+    return await account_operation_service.list_for_user(user_id)
+
+
+@api_router.post(
+    "/account-operations",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AccountOperationDTO,
+)
+async def create_account_operation(
+    data: AccountOperationCreate,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    account_operation_service: Annotated[
+        AccountOperationService, Depends(get_account_operation_service)
+    ],
+) -> AccountOperationDTO:
+    """Record an account operation (deposit/withdrawal/tax) for the caller.
+
+    Raises:
+        HTTPException: 404 when the referenced broker account does not exist
+            or is owned by another user (mapped by
+            :func:`register_exception_handlers`).
+    """
+    return await account_operation_service.create(data, user_id)
+
+
+@api_router.get("/account-operations/{operation_id}", response_model=AccountOperationDTO)
+async def get_account_operation(
+    operation_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    account_operation_service: Annotated[
+        AccountOperationService, Depends(get_account_operation_service)
+    ],
+) -> AccountOperationDTO:
+    """Fetch one account operation.
+
+    Raises:
+        HTTPException: 404 when no operation with this id exists; 403 when it
+            is owned by another user (mapped by
+            :func:`register_exception_handlers`).
+    """
+    operation = await account_operation_service.get(operation_id, user_id)
+    if operation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Account operation {operation_id} not found",
+        )
+    return operation
+
+
+@api_router.put("/account-operations/{operation_id}", response_model=AccountOperationDTO)
+async def update_account_operation(
+    operation_id: int,
+    data: AccountOperationUpdate,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    account_operation_service: Annotated[
+        AccountOperationService, Depends(get_account_operation_service)
+    ],
+) -> AccountOperationDTO:
+    """Partially update an account operation (``None`` fields unchanged).
+
+    Raises:
+        HTTPException: 404 when no operation with this id exists; 403 when it
+            is owned by another user (mapped by
+            :func:`register_exception_handlers`).
+    """
+    updated = await account_operation_service.update(operation_id, data, user_id)
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Account operation {operation_id} not found",
+        )
+    return updated
+
+
+@api_router.delete("/account-operations/{operation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account_operation(
+    operation_id: int,
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    account_operation_service: Annotated[
+        AccountOperationService, Depends(get_account_operation_service)
+    ],
+) -> None:
+    """Delete an account operation.
+
+    Raises:
+        HTTPException: 404 when no operation with this id exists; 403 when it
+            is owned by another user (mapped by
+            :func:`register_exception_handlers`).
+    """
+    deleted = await account_operation_service.delete(operation_id, user_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Account operation {operation_id} not found",
+        )
+
+
 # --------------------------------------------------------------------------- #
 # portfolio / analytics endpoints (bearer auth)
 # --------------------------------------------------------------------------- #
@@ -614,10 +832,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         BrokerAccountHasTransactionsError, _detail_response(status.HTTP_409_CONFLICT)
     )
     app.add_exception_handler(
+        BrokerAccountHasOperationsError, _detail_response(status.HTTP_409_CONFLICT)
+    )
+    app.add_exception_handler(
+        AccountOperationForbiddenError, _detail_response(status.HTTP_403_FORBIDDEN)
+    )
+    app.add_exception_handler(
         InsufficientPositionError, _detail_response(status.HTTP_422_UNPROCESSABLE_CONTENT)
     )
     app.add_exception_handler(
         InvalidTransactionError, _detail_response(status.HTTP_400_BAD_REQUEST)
+    )
+    app.add_exception_handler(
+        TransactionForbiddenError, _detail_response(status.HTTP_403_FORBIDDEN)
     )
     app.add_exception_handler(UsernameTakenError, _detail_response(status.HTTP_409_CONFLICT))
     app.add_exception_handler(

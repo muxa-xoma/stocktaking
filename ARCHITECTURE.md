@@ -12,12 +12,19 @@ The application lets users track a bond portfolio:
 - **Instruments** — bonds identified by ISIN, with nominal, coupon rate
   (ANNUAL / SEMI_ANNUAL / QUARTERLY), and maturity date.
 - **Transactions** — BUY / SELL / MATURE operations on a bond.
+- **Account operations** — DEPOSIT / WITHDRAWAL / TAX operations on a
+  broker account.
+- **Brokers & broker accounts** — brokers (with commission settings) and
+  their accounts (STANDARD / IIS / LTD).
 - **Positions** — net bond quantity per user, always **derived** from
   transactions (`sum(BUY) − sum(SELL) − sum(MATURE)`), never stored.
 - **Yield analytics** — YTM, current yield, accrued coupon (НКД), coupon
   schedule, portfolio summary, realized P&L.
 - **Auth** — username/password (bcrypt) with JWT (HS256); the web UI keeps
   the JWT in a `token` cookie, the REST API expects a Bearer token.
+
+The application is branded as **Home Stocktaking** in the UI (package name
+`bond_accounting` retained).
 
 Everything ships in one process: a single uvicorn server exposes both the
 NiceGUI pages and the REST API (`/api`), backed by an async SQLAlchemy engine
@@ -38,6 +45,8 @@ graph TD
         Auth["auth — JWT + bcrypt"]
         Bonds["bonds — instrument CRUD"]
         Portfolio["portfolio — transactions & positions"]
+        Brokers["brokers — broker & account CRUD"]
+        AcctOps["account_operations — account operations CRUD"]
         Analytics["analytics — portfolio metrics"]
         YieldCalc["yield_calc — pure math (no deps)"]
         Bus["event_bus — async pub/sub"]
@@ -54,17 +63,24 @@ graph TD
     API --> Auth
     API --> Bonds
     API --> Portfolio
+    API --> Brokers
+    API --> AcctOps
     API --> Analytics
     UI --> Auth
     UI --> Bonds
     UI --> Portfolio
+    UI --> Brokers
+    UI --> AcctOps
     UI --> Analytics
     Analytics --> YieldCalc
     Bonds --> Bus
     Portfolio --> Bus
+    Brokers --> Bus
     Bus --> Analytics
     Bonds --> DB
     Portfolio --> DB
+    Brokers --> DB
+    AcctOps --> DB
     Analytics --> DB
     Auth --> DB
     DB --> SQLite
@@ -82,15 +98,17 @@ re-exported from each package's `__init__.py`.
 | Module | Responsibility | Public interface | Depends on |
 |---|---|---|---|
 | `config` | Settings from YAML + `BOND_*` env vars (pydantic-settings); logging setup | `load_settings()`, `Settings`, `AppConfig`, `DatabaseConfig`, `AuthConfig`, `EventBusConfig`, `LoggingConfig`; logging is configured via `bond_accounting.config.logging_setup.setup_logging()` (not re-exported through the package `__all__`) | — |
-| `db` | SQLAlchemy 2.0 async ORM: models, engine & session factories | `Base`, `User`, `Bond`, `Transaction`, `create_engine_from_settings()`, `create_session_factory()` | `config` |
+| `db` | SQLAlchemy 2.0 async ORM: models, engine & session factories | `Base`, `User`, `Bond`, `Transaction`, `AccountOperation`, `create_engine_from_settings()`, `create_session_factory()`. The models also include `Broker` and `BrokerAccount` (defined in `db/models.py`, but not re-exported through the package `__all__`) | `config` |
 | `auth` | Register/login service, JWT (HS256) issuing/verification, bcrypt hashing | `AuthService`, `JwtService`, `PasswordHasher`, `TokenPayload`, `AuthError`, `InvalidCredentialsError`, `UsernameTakenError`, `JwtError` | `db` |
 | `bonds` | Bond CRUD with EventBus publishing on change | `BondService`, `BondCreate`, `BondDTO`, `BondUpdate`, `BondError`, `BondNotFoundError`, `BondNotOwnedError`, `BondIsinDuplicateError`, `BondDeletionBlockedError` | `db`, `event_bus` |
+| `brokers` | Broker & broker-account CRUD with EventBus publishing | `BrokerService`, `BrokerCreate`, `BrokerUpdate`, `BrokerDTO`, `BrokerAccountCreate`, `BrokerAccountUpdate`, `BrokerAccountDTO`, `BrokerHasAccountsError`, `BrokerAccountHasTransactionsError` | `db`, `event_bus` |
+| `account_operations` | Account operation CRUD (DEPOSIT/WITHDRAWAL/TAX) | `AccountOperationService`, `AccountOperationCreate`, `AccountOperationUpdate`, `AccountOperationDTO` | `db` |
 | `portfolio` | Record BUY/SELL/MATURE transactions, derive positions, publish events | `PortfolioService`, `TransactionCreate`, `TransactionDTO`, `PositionDTO`, `PortfolioError`, `InvalidTransactionError`, `InsufficientPositionError` | `db`, `event_bus` |
 | `analytics` | Portfolio/position metrics, coupon schedule, cashflows, realized P&L; reacts to change events | `AnalyticsService`, `attach_to_event_bus()`, `PortfolioSummary`, `PositionAnalytics`, `Cashflow`, `CouponDue`, `RealizedPnl` | `db`, `event_bus`, `yield_calc` |
 | `yield_calc` | Pure-math yield calculations | `calculate_ytm()`, `calculate_current_yield()`, `calculate_accrued_coupon()`, `build_coupon_schedule()`, `CouponPayment`, `YtmCalculationError` | — |
 | `event_bus` | In-process async pub/sub with topic registry, backpressure, failure isolation | `EventBus`, `AsyncQueueEventBus`, `Message`, `Topic`, `ALL_TOPICS`, `RequestHandlerError`, `RequestTimeoutError` | `config` |
-| `api` | REST API router (12 endpoints under `/api`) + dependency wiring + exception handlers | `api_router`, `build_api_dependencies()`, `register_exception_handlers()`, `ApiDependencies`, `LoginRequest`, `RegisterRequest` | `auth`, `bonds`, `portfolio`, `analytics` |
-| `ui` | NiceGUI pages (login, register, home, bonds, transactions, analytics) | `create_ui_app()` | `auth`, `bonds`, `portfolio`, `analytics` |
+| `api` | REST API router (~30 endpoints under `/api`) + dependency wiring + exception handlers | `api_router`, `build_api_dependencies()`, `register_exception_handlers()`, `ApiDependencies` (frozen dataclass with 7 provider fields), `LoginRequest`, `RegisterRequest` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations` |
+| `ui` | NiceGUI pages (login, register, home, bonds, transactions, analytics, brokers, accounts, operations) with drawer navigation, a dark theme, and modal CRUD forms (`CrudPageMixin`); `create_ui_app()` takes 7 arguments (6 services + `account_operation_service`) | `create_ui_app()` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations` |
 | `main` | Composition root: settings → engine → migrations → services → bus → UI + API → serve & shut down | `main()`, `run()` (console entry point `bond-accounting`) | all |
 | `external_bus` | Placeholder for future external bus integration (currently just a package docstring) | — | — |
 
@@ -117,8 +135,10 @@ re-exported from each package's `__init__.py`.
   database URL itself through `load_settings()`; `alembic.ini` deliberately
   contains no URL. `alembic upgrade head` runs in-process at startup.
 - **Event-driven analytics via in-process async pub/sub** — `bond.updated`,
-  `bond.deleted`, `transaction.created`, `position.updated` events trigger an
-  analytics recalculation, which republishes `portfolio.recalculated`.
+  `bond.deleted`, `transaction.created`, `transaction.updated`,
+  `transaction.deleted`, `position.updated`, `broker.*`,
+  `broker_account.*` events trigger an analytics recalculation, which
+  republishes `portfolio.recalculated`.
   Subscribers are failure-isolated; ordering is preserved per topic.
 - **API router mounted directly on `nicegui.app`** (not a sub-mounted
   `FastAPI()`) so exception handlers and dependency overrides apply to API

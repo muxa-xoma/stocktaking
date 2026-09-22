@@ -23,7 +23,7 @@ from __future__ import annotations
 # against the module namespace when building the model schema, so `datetime`
 # must NOT live under TYPE_CHECKING.
 import datetime  # noqa: TC003
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,36 @@ class TransactionCreate(BaseModel):
     price: float = Field(gt=0, description="Price per unit; must be positive.")
     date: datetime.date
     commission: float = Field(default=0.0, description="Broker commission.")
+
+
+class TransactionUpdate(BaseModel):
+    """Partial update input for a transaction: only provided fields change.
+
+    The service dumps this model with ``exclude_unset=True``, so omitted
+    fields leave the corresponding columns untouched. All transaction
+    columns are ``NOT NULL``, so an explicit ``null`` is not a meaningful
+    value for any field and is treated as "not provided"
+    (:attr:`NULLABLE_FIELDS` is therefore empty, kept for symmetry with
+    the other ``*Update`` DTOs).
+    """
+
+    #: Fields whose columns are nullable — none for transactions, so an
+    #: explicit ``null`` never reaches the database.
+    NULLABLE_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    bond_id: int | None = Field(default=None, description="Move the transaction to another bond.")
+    broker_account_id: int | None = Field(
+        default=None, gt=0, description="Broker account the transaction is executed on."
+    )
+    type: TransactionType | None = Field(
+        default=None, description="Operation kind; one of ``BUY``, ``SELL``, ``MATURE``."
+    )
+    quantity: int | None = Field(
+        default=None, gt=0, description="Number of bond units; must be strictly positive."
+    )
+    price: float | None = Field(default=None, gt=0, description="Price per unit; must be positive.")
+    date: datetime.date | None = Field(default=None, description="Operation date.")
+    commission: float | None = Field(default=None, description="Broker commission.")
 
 
 class TransactionDTO(BaseModel):

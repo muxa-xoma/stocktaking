@@ -24,13 +24,19 @@ if TYPE_CHECKING:
 #: (``ck_broker_accounts_type``) and :data:`BROKER_ACCOUNT_TYPES`.
 BrokerAccountType = Literal["STANDARD", "IIS", "LTD"]
 
+#: How :attr:`Broker.min_commission` is interpreted; matches the DB CHECK
+#: constraint (``ck_brokers_min_commission_type``) and
+#: :data:`MIN_COMMISSION_TYPES`.
+MinCommissionType = Literal["PERCENT", "RUBLES"]
+
 
 class BrokerCreate(BaseModel):
     """Input for creating a broker.
 
     Raises:
         pydantic.ValidationError: If any field is invalid — in particular
-            when ``commission`` / ``min_commission`` are negative.
+            when ``commission`` / ``min_commission`` are negative or
+            ``min_commission_type`` is not one of ``PERCENT``, ``RUBLES``.
     """
 
     name: str = Field(description="Unique broker name.")
@@ -40,7 +46,16 @@ class BrokerCreate(BaseModel):
         description="Commission percent (e.g. 5.0 = 5%).",
     )
     min_commission: float | None = Field(
-        default=None, ge=0, description="Optional minimum commission percent."
+        default=None,
+        ge=0,
+        description=(
+            "Optional minimum commission (percent or fixed rubles depending "
+            "on min_commission_type)."
+        ),
+    )
+    min_commission_type: MinCommissionType = Field(
+        default="PERCENT",
+        description="Interpretation of min_commission: percent or fixed rubles.",
     )
     description: str | None = Field(default=None, description="Optional free-form description.")
 
@@ -65,7 +80,15 @@ class BrokerUpdate(BaseModel):
         default=None, ge=0, description="Commission percent (e.g. 5.0 = 5%)."
     )
     min_commission: float | None = Field(
-        default=None, ge=0, description="Minimum commission percent."
+        default=None,
+        ge=0,
+        description=(
+            "Minimum commission (percent or fixed rubles depending on min_commission_type)."
+        ),
+    )
+    min_commission_type: MinCommissionType | None = Field(
+        default=None,
+        description="Interpretation of min_commission: percent or fixed rubles.",
     )
     description: str | None = None
 
@@ -79,6 +102,7 @@ class BrokerDTO(BaseModel):
     name: str
     commission: float
     min_commission: float | None
+    min_commission_type: str
     description: str | None
     created_at: datetime.datetime
 
@@ -90,6 +114,7 @@ class BrokerDTO(BaseModel):
             name=obj.name,
             commission=obj.commission,
             min_commission=obj.min_commission,
+            min_commission_type=obj.min_commission_type,
             description=obj.description,
             created_at=obj.created_at,
         )

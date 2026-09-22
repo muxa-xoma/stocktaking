@@ -12,7 +12,7 @@ from nicegui import ui
 from bond_accounting.brokers.dto import BrokerCreate, BrokerUpdate
 from bond_accounting.brokers.exceptions import BrokerHasAccountsError
 from bond_accounting.ui.base_page import BasePage
-from bond_accounting.ui.common import fmt_raw_percent, page_header
+from bond_accounting.ui.common import page_header, style_table
 from bond_accounting.ui.crud_mixin import CrudPageMixin
 
 if TYPE_CHECKING:
@@ -21,12 +21,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Варианты интерпретации минимальной комиссии: значение DTO -> подпись в UI.
+_MIN_COMMISSION_TYPE_OPTIONS: dict[str, str] = {
+    "PERCENT": "Процент",
+    "RUBLES": "Рубли",
+}
+
+#: Подсказка к полю минимальной комиссии: смысл значения зависит от типа.
+_MIN_COMMISSION_HINT = (
+    "Значение зависит от типа мин. комиссии: "
+    "процент от суммы сделки или фиксированная сумма в рублях"
+)
+
 _COLUMNS: list[dict[str, Any]] = [
     {"name": "name", "label": "Название", "field": "name", "align": "left", "sortable": True},
     {"name": "commission", "label": "Комиссия, %", "field": "commission", "align": "right"},
     {
         "name": "min_commission",
-        "label": "Мин. комиссия, %",
+        "label": "Мин. комиссия",
         "field": "min_commission",
         "align": "right",
     },
@@ -40,24 +52,36 @@ class _BrokersState:
 
     Создаётся в :meth:`BrokersPage.render` в локальной области видимости и
     передаётся первым аргументом в общие методы :class:`CrudPageMixin`
-    (поля ``cache``, ``selected_id``, ``table``, ``selected_label``,
-    ``delete_dialog`` — часть интерфейса миксина). Виджетные поля заполняются
-    по мере построения страницы в :meth:`render`.
+    (поля ``cache``, ``selected_id``, ``table``, ``create_dialog``,
+    ``edit_dialog``, ``confirm_delete_dialog`` — часть интерфейса миксина).
+    Виджетные поля заполняются по мере построения страницы в
+    :meth:`render`.
     """
 
     cache: dict[int, Any]
     selected_id: int | None
     table: Any = None
-    selected_label: Any = None
+    create_dialog: Any = None
+    edit_dialog: Any = None
+    confirm_delete_dialog: Any = None
+    confirm_message: Any = None
     name_input: Any = None
     commission_input: Any = None
     min_commission_input: Any = None
+    min_commission_type_select: Any = None
     description_input: Any = None
     edit_name: Any = None
     edit_commission: Any = None
     edit_min_commission: Any = None
+    edit_min_commission_type: Any = None
     edit_description: Any = None
-    delete_dialog: Any = None
+
+
+def _fmt_min_commission(value: float | None, commission_type: str) -> str:
+    """Форматировать минимальную комиссию с единицей, зависящей от типа."""
+    if value is None:
+        return "—"
+    return f"{value:.2f} ₽" if commission_type == "RUBLES" else f"{value:.2f}%"
 
 
 class BrokersPage(BasePage, CrudPageMixin):
@@ -75,7 +99,7 @@ class BrokersPage(BasePage, CrudPageMixin):
     entity_accusative: ClassVar[str] = "брокера"
     entity_genitive: ClassVar[str] = "брокера"
     selected_verb: ClassVar[str] = "Выбран брокер:"
-    no_selection_text: ClassVar[str] = "Брокер не выбран — отметьте строку в таблице"
+    no_selection_text: ClassVar[str] = "Брокер не выбран — кликните по строке в таблице"
     name_required_message: ClassVar[str] = "Название обязательно"
     created_suffix: ClassVar[str] = "добавлен"
     updated_suffix: ClassVar[str] = "обновлён"
@@ -100,8 +124,11 @@ class BrokersPage(BasePage, CrudPageMixin):
             {
                 "id": broker.id,
                 "name": broker.name,
-                "commission": fmt_raw_percent(broker.commission),
-                "min_commission": fmt_raw_percent(broker.min_commission),
+                "commission": f"{broker.commission:.2f}%",
+                "min_commission": _fmt_min_commission(
+                    broker.min_commission,
+                    getattr(broker, "min_commission_type", "PERCENT"),
+                ),
                 "description": broker.description or "—",
             }
             for broker in brokers
@@ -114,7 +141,11 @@ class BrokersPage(BasePage, CrudPageMixin):
         state.edit_min_commission.value = (
             entity.min_commission if entity.min_commission is not None else None
         )
+        state.edit_min_commission_type.value = getattr(entity, "min_commission_type", "PERCENT")
         state.edit_description.value = entity.description or ""
+        state.confirm_message.set_text(
+            f"Вы уверены, что хотите удалить {self.entity_accusative} '{entity.name}'?"
+        )
 
     def _entity_name(self, entity: Any) -> str:
         """Краткое имя брокера для сообщений о создании/обновлении."""
@@ -132,6 +163,7 @@ class BrokersPage(BasePage, CrudPageMixin):
             min_commission=float(state.min_commission_input.value)
             if state.min_commission_input.value is not None
             else None,
+            min_commission_type=state.min_commission_type_select.value or "PERCENT",
             description=state.description_input.value or None,
         )
 
@@ -145,6 +177,7 @@ class BrokersPage(BasePage, CrudPageMixin):
             min_commission=float(state.edit_min_commission.value)
             if state.edit_min_commission.value is not None
             else None,
+            min_commission_type=state.edit_min_commission_type.value or None,
             description=state.edit_description.value or None,
         )
 
@@ -171,63 +204,80 @@ class BrokersPage(BasePage, CrudPageMixin):
             logger.info("UI: удалён брокер id=%s", entity_id)
         return deleted
 
+    def _reset_create_form(self, state: _BrokersState) -> None:
+        state.name_input.value = None
+        state.commission_input.value = 0
+        state.min_commission_input.value = None
+        state.min_commission_type_select.value = "PERCENT"
+        state.description_input.value = None
+
     # -- Страница ------------------------------------------------------------
 
     async def render(self, user: TokenPayload) -> None:
-        """Таблица брокеров, форма создания и форма правки/удаления выбранного."""
+        """Таблица брокеров и модальные окна создания/правки/удаления."""
         #: State создаётся до построения виджетов, чтобы обработчики (связанные
         #: через ``functools.partial``) ссылались на уже существующий объект
         #: ещё в момент построения кнопок.
         state = _BrokersState(cache={}, selected_id=None)
 
         page_header("/brokers")
-        with ui.column().classes("w-full max-w-5xl mx-auto gap-6"):
-            ui.label("Брокеры").classes("text-h5")
-            table = ui.table(
-                columns=_COLUMNS,
-                rows=[],
-                row_key="id",
-                selection="single",
-            ).classes("w-full")
+        with ui.column().classes("w-full gap-6"):
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label("Брокеры").classes("text-h5")
+                ui.button(
+                    "Добавить", icon="add", on_click=partial(self._open_create_dialog, state)
+                ).props("color=primary")
+
+            table = ui.table(columns=_COLUMNS, rows=[], row_key="id")
+            style_table(table)
             state.table = table
 
-            with ui.card().classes("w-full"):
-                ui.label("Новый брокер").classes("text-subtitle1")
-                with ui.row().classes("w-full items-start gap-2"):
-                    state.name_input = ui.input("Название")
-                    state.commission_input = ui.number("Комиссия, %", value=0, min=0)
-                    state.min_commission_input = ui.number("Мин. комиссия, %", min=0)
-                    state.description_input = ui.input("Описание (необязательно)")
-                ui.button("Добавить", icon="add", on_click=partial(self._handle_create, state))
+        with ui.dialog() as create_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.create_dialog = create_dialog
+            ui.label("Новый брокер").classes("text-h6")
+            with ui.column().classes("w-full gap-2"):
+                state.name_input = ui.input("Название")
+                state.commission_input = ui.number("Комиссия, %", value=0, min=0)
+                state.min_commission_input = ui.number("Мин. комиссия", min=0).tooltip(
+                    _MIN_COMMISSION_HINT
+                )
+                state.min_commission_type_select = ui.select(
+                    _MIN_COMMISSION_TYPE_OPTIONS, value="PERCENT", label="Тип мин. комиссии"
+                )
+                state.description_input = ui.input("Описание (необязательно)")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Готово", icon="check", on_click=partial(self._handle_create, state))
+                ui.button("Отмена", on_click=create_dialog.close).props("flat")
 
-            with ui.card().classes("w-full"):
-                state.selected_label = ui.label(
-                    "Брокер не выбран — отметьте строку в таблице"
-                ).classes("text-subtitle1")
-                with ui.row().classes("w-full items-start gap-2"):
-                    state.edit_name = ui.input("Название")
-                    state.edit_commission = ui.number("Комиссия, %", min=0)
-                    state.edit_min_commission = ui.number("Мин. комиссия, %", min=0)
-                    state.edit_description = ui.input("Описание (необязательно)")
-                with ui.row().classes("gap-2"):
-                    ui.button(
-                        "Сохранить изменения",
-                        icon="save",
-                        on_click=partial(self._handle_update, state),
-                    )
-                    ui.button(
-                        "Удалить", icon="delete", on_click=partial(self._handle_delete, state)
-                    ).props("color=negative")
+        with ui.dialog() as edit_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.edit_dialog = edit_dialog
+            ui.label("Редактирование брокера").classes("text-h6")
+            with ui.column().classes("w-full gap-2"):
+                state.edit_name = ui.input("Название")
+                state.edit_commission = ui.number("Комиссия, %", min=0)
+                state.edit_min_commission = ui.number("Мин. комиссия", min=0).tooltip(
+                    _MIN_COMMISSION_HINT
+                )
+                state.edit_min_commission_type = ui.select(
+                    _MIN_COMMISSION_TYPE_OPTIONS, value="PERCENT", label="Тип мин. комиссии"
+                )
+                state.edit_description = ui.input("Описание (необязательно)")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Сохранить", icon="save", on_click=partial(self._handle_update, state))
+                ui.button(
+                    "Удалить", icon="delete", on_click=partial(self._handle_delete, state)
+                ).props("color=negative")
+                ui.button("Отмена", on_click=edit_dialog.close).props("flat")
 
-            with ui.dialog() as delete_dialog, ui.card():
-                state.delete_dialog = delete_dialog
-                ui.label("Удалить выбранного брокера?")
-                with ui.row():
-                    ui.button("Удалить", on_click=partial(self._confirm_delete, state)).props(
-                        "color=negative"
-                    )
-                    ui.button("Отмена", on_click=delete_dialog.close).props("flat")
+        with ui.dialog() as confirm_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.confirm_delete_dialog = confirm_dialog
+            state.confirm_message = ui.label("")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Да", on_click=partial(self._confirm_delete, state)).props(
+                    "color=negative"
+                )
+                ui.button("Нет", on_click=confirm_dialog.close).props("flat")
 
-        table.on_select(partial(self._on_table_select, state))
+        table.on("rowClick", partial(self._on_table_select, state))
 
         await self._reload(state)

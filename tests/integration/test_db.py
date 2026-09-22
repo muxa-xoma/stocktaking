@@ -60,6 +60,7 @@ EXPECTED_COLUMNS = {
         "name",
         "commission",
         "min_commission",
+        "min_commission_type",
         "description",
         "created_at",
     },

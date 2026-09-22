@@ -139,12 +139,15 @@ configuration is invalid or the YAML file is malformed.
 
 The database layer lives in `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount` —
-  SQLAlchemy 2.0 models (`Mapped`/`mapped_column`), with CHECK constraints
-  on `transactions.type` (`BUY`/`SELL`/`MATURE`) and `bonds.coupon_frequency`
-  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`). `Broker.commission`/`min_commission`
-  are stored as **percent** (5.0 = 5%); `BrokerAccount.broker_id` is
-  mandatory (NOT NULL).
+- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount`,
+  `AccountOperation` — SQLAlchemy 2.0 models (`Mapped`/`mapped_column`), with
+  CHECK constraints on `transactions.type` (`BUY`/`SELL`/`MATURE`),
+  `account_operations.type` (`DEPOSIT`/`WITHDRAWAL`/`TAX`), and
+  `bonds.coupon_frequency` (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+  `Broker.commission` is stored as **percent** (5.0 = 5%);
+  `Broker.min_commission` is interpreted according to
+  `Broker.min_commission_type` (`PERCENT` or `RUBLES`);
+  `BrokerAccount.broker_id` is mandatory (NOT NULL).
 - `create_engine_from_settings(db_config)` — async engine factory
   (`create_async_engine`); SQLite pragmas are applied via a `connect` event
   listener (see above).
@@ -188,10 +191,13 @@ src/
     auth/         # JWT auth: password hashing, token issue/verify, service
     bonds/        # bond instruments CRUD
     brokers/      # broker & broker-account CRUD
+    account_operations/ # account operations CRUD (DEPOSIT/WITHDRAWAL/TAX)
     portfolio/    # portfolio management, position netting
     yield_calc/   # yield calculations (accrued coupon, current yield, YTM)
     analytics/    # analytics (subscribed to the event bus)
-    ui/           # NiceGUI web UI (auth, bonds, transactions, portfolio, analytics)
+    ui/           # NiceGUI web UI (drawer navigation, dark theme, modal CRUD
+                  #  forms; auth, bonds, transactions, portfolio, analytics,
+                  #  brokers, accounts, operations pages)
     api/          # REST API (FastAPI router, dependencies, error handling)
     external_bus/ # external bus (future)
 alembic/          # Alembic migrations (async env.py)
@@ -229,24 +235,23 @@ uv run pytest -q --cov=bond_accounting --cov-report=term-missing
 
 This prints per-module line coverage with the uncovered line numbers. Add
 `--cov-report=html` to get a browsable HTML report in `htmlcov/`. The current
-line coverage of `bond_accounting/` is about 92%. The entry point `main.py`
-is not exercised by tests (it is verified by actually running the
-application); without `main.py` the coverage is about 97%.
+line coverage of `bond_accounting/` is about 91% (538 tests, 90.77% line
+coverage). The entry point `main.py` is not exercised by tests (it is
+verified by actually running the application); without `main.py` the
+coverage is correspondingly higher.
 
 ## Code Quality
 
-The project uses four linters/type checkers, all run through `uv`. Ruff and
-mypy are the enforced gates (CI must pass); `ty` and `pyrefly` are
-additional type checkers whose findings are currently being triaged (see
-open questions in the tooling task tracker) — they are not yet blocking.
+The project uses four linters/type checkers, all run through `uv`. All four
+are enforced gates — CI must pass each of them.
 
 | Tool | Purpose | Command |
 | --- | --- | --- |
 | [Ruff](https://docs.astral.sh/ruff/) | Linter + formatter | `uv run ruff check .` |
 | | | `uv run ruff format --check .` |
 | [mypy](https://mypy-lang.org/) | Type checker (gate) | `uv run mypy src` |
-| [ty](https://docs.astral.sh/ty/) | Type checker (Astral) | `uv run ty check src tests` |
-| [Pyrefly](https://pyrefly.org/) | Type checker (Meta) | `uv run pyrefly check --min-severity warn` |
+| [ty](https://docs.astral.sh/ty/) | Type checker (Astral, gate) | `uv run ty check src tests` |
+| [Pyrefly](https://pyrefly.org/) | Type checker (Meta, gate) | `uv run pyrefly check --min-severity warn` |
 
 > **Note on the pyrefly "suppressed" counter:** the summary line
 > `N suppressed` is not the number of actually hidden diagnostics —

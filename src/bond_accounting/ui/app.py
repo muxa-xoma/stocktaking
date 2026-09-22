@@ -15,9 +15,11 @@ from bond_accounting.ui.pages_auth import LoginPage, RegisterPage
 from bond_accounting.ui.pages_bonds import BondsPage
 from bond_accounting.ui.pages_brokers import BrokersPage
 from bond_accounting.ui.pages_home import HomePage
+from bond_accounting.ui.pages_operations import OperationsPage
 from bond_accounting.ui.pages_transactions import TransactionsPage
 
 if TYPE_CHECKING:
+    from bond_accounting.account_operations.service import AccountOperationService
     from bond_accounting.analytics.service import AnalyticsService
     from bond_accounting.auth.jwt_service import JwtService
     from bond_accounting.auth.service import AuthService
@@ -35,6 +37,7 @@ def create_ui_app(
     broker_service: BrokerService,
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
+    account_operation_service: AccountOperationService,
 ) -> None:
     """Зарегистрировать все страницы UI (вызывается из main.py ДО ui.run()).
 
@@ -45,6 +48,8 @@ def create_ui_app(
         broker_service: Сервис CRUD брокеров и брокерских счетов.
         portfolio_service: Сервис сделок и позиций.
         analytics_service: Сервис аналитики портфеля.
+        account_operation_service: Сервис CRUD операций по счёту
+            (пополнения, выводы, налоги).
     """
     LoginPage(auth_service, jwt_service).register()
     RegisterPage(auth_service, jwt_service).register()
@@ -53,8 +58,9 @@ def create_ui_app(
     BrokersPage(jwt_service, broker_service).register()
     AccountsPage(jwt_service, broker_service).register()
     TransactionsPage(jwt_service, portfolio_service, bond_service, broker_service).register()
+    OperationsPage(jwt_service, account_operation_service, broker_service).register()
     AnalyticsPage(jwt_service, analytics_service, broker_service).register()
     logger.info(
         "UI: страницы зарегистрированы (/login, /register, /, /bonds, /brokers, "
-        "/accounts, /transactions, /analytics)"
+        "/accounts, /transactions, /operations, /analytics)"
     )

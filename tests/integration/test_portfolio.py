@@ -24,6 +24,7 @@ from bond_accounting.portfolio import (
     PortfolioService,
     TransactionCreate,
 )
+from bond_accounting.portfolio.dto import TransactionUpdate
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -474,6 +475,61 @@ async def test_events_published_on_buy(
     assert updated_payload["quantity"] == 10
     assert updated_payload["avg_buy_price"] == pytest.approx(1000.0)
     assert updated_payload["total_invested"] == pytest.approx(10000.0)
+
+
+async def test_events_published_on_update(
+    service: PortfolioService,
+    event_bus: AsyncQueueEventBus,
+    user_and_bond_ids: tuple[int, int],
+) -> None:
+    user_id, bond_id = user_and_bond_ids
+    dto = await service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+
+    updated_txn: list[Message] = []
+    updated_pos: list[Message] = []
+    event_bus.subscribe(Topic.TRANSACTION_UPDATED, _collector(updated_txn))
+    event_bus.subscribe(Topic.POSITION_UPDATED, _collector(updated_pos))
+
+    await service.update_transaction(dto.id, TransactionUpdate(price=1100.0), user_id)
+
+    await _wait_until(lambda: len(updated_txn) >= 1 and len(updated_pos) >= 1)
+
+    assert updated_txn[0].topic == "transaction.updated"
+    txn_payload: dict[str, Any] = dict(updated_txn[0].payload)
+    assert txn_payload["id"] == dto.id
+    assert txn_payload["price"] == 1100.0
+
+    assert updated_pos[0].topic == "position.updated"
+    pos_payload: dict[str, Any] = dict(updated_pos[0].payload)
+    assert pos_payload["avg_buy_price"] == pytest.approx(1100.0)
+    assert pos_payload["quantity"] == 10
+
+
+async def test_events_published_on_delete(
+    service: PortfolioService,
+    event_bus: AsyncQueueEventBus,
+    user_and_bond_ids: tuple[int, int],
+) -> None:
+    user_id, bond_id = user_and_bond_ids
+    dto = await service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+
+    deleted_txn: list[Message] = []
+    updated_pos: list[Message] = []
+    event_bus.subscribe(Topic.TRANSACTION_DELETED, _collector(deleted_txn))
+    event_bus.subscribe(Topic.POSITION_UPDATED, _collector(updated_pos))
+
+    deleted = await service.delete_transaction(dto.id, user_id)
+    assert deleted is True
+
+    await _wait_until(lambda: len(deleted_txn) >= 1 and len(updated_pos) >= 1)
+
+    assert deleted_txn[0].topic == "transaction.deleted"
+    deleted_payload: dict[str, Any] = dict(deleted_txn[0].payload)
+    assert deleted_payload == {"transaction_id": dto.id}
+
+    assert updated_pos[0].topic == "position.updated"
+    pos_payload: dict[str, Any] = dict(updated_pos[0].payload)
+    assert pos_payload["quantity"] == 0
 
 
 async def test_no_events_published_on_rejected_sell(

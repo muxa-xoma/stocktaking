@@ -146,12 +146,15 @@ BOND_LOGGING__FORMAT="text"
 
 Слой работы с БД живёт в `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount` — модели
-  SQLAlchemy 2.0 (`Mapped`/`mapped_column`) с CHECK-ограничениями на
-  `transactions.type` (`BUY`/`SELL`/`MATURE`) и `bonds.coupon_frequency`
-  (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`). `Broker.commission`/`min_commission`
-  хранятся в **процентах** (5.0 = 5%); `BrokerAccount.broker_id` —
-  обязательное поле (NOT NULL).
+- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount`,
+  `AccountOperation` — модели SQLAlchemy 2.0 (`Mapped`/`mapped_column`) с
+  CHECK-ограничениями на `transactions.type` (`BUY`/`SELL`/`MATURE`),
+  `account_operations.type` (`DEPOSIT`/`WITHDRAWAL`/`TAX`) и
+  `bonds.coupon_frequency` (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+  `Broker.commission` хранится в **процентах** (5.0 = 5%);
+  `Broker.min_commission` интерпретируется в зависимости от
+  `Broker.min_commission_type` (`PERCENT` или `RUBLES`);
+  `BrokerAccount.broker_id` — обязательное поле (NOT NULL).
 - `create_engine_from_settings(db_config)` — фабрика async-движка
   (`create_async_engine`); прагмы SQLite применяются через слушатель события
   `connect` (см. выше).
@@ -194,10 +197,13 @@ src/bond_accounting/
   auth/           # JWT-аутентификация, хеширование паролей (bcrypt)
   bonds/          # облигации: CRUD-сервис с публикацией в event bus
   brokers/        # брокеры и брокерские счета: CRUD-сервис
+  account_operations/ # операции по счёту: CRUD (DEPOSIT/WITHDRAWAL/TAX)
   portfolio/      # портфель: сделки, позиции, неттинг
   yield_calc/     # доходности: YTM, текущая, НКД, график купонов
   analytics/      # метрики портфеля и отчёты (подписана на event bus)
-  ui/             # веб-интерфейс на NiceGUI (логин, облигации, сделки, портфель, аналитика)
+  ui/             # веб-интерфейс на NiceGUI (drawer-навигация, тёмная тема,
+                  #  модальные CRUD-формы; страницы: логин, облигации, сделки,
+                  #  портфель, аналитика, брокеры, счета, операции)
   api/            # публичный REST API (FastAPI)
   external_bus/   # интеграция с внешней шиной событий (зарезервировано)
 alembic/          # миграции Alembic (async env.py)
@@ -240,24 +246,22 @@ uv run pytest -q --cov=bond_accounting --cov-report=term-missing
 Команда запускает все тесты с замером покрытия (`pytest-cov` входит в
 dev-зависимости `pyproject.toml`). Добавьте `--cov-report=html`, чтобы
 получить открываемый в браузере HTML-отчёт в `htmlcov/`. Текущее покрытие
-по строкам — около 92%
+по строкам — около 91% (538 тестов, 90.77% по строкам).
 (точка входа `main.py` не покрывается тестами: она проверяется фактическим
-запуском приложения; без неё — около 97%).
+запуском приложения; без неё покрытие, соответственно, выше).
 
 ## Качество кода
 
 В проекте используются четыре линтера/тайпчекера, все запускаются через `uv`.
-Ruff и mypy — обязательные гейты (CI должен проходить); `ty` и `pyrefly` —
-дополнительные тайпчекеры, находки которых сейчас разбираются, они пока
-не блокирующие.
+Все четыре — обязательные гейты: CI должен проходить каждый из них.
 
 | Инструмент | Назначение | Команда |
 | --- | --- | --- |
 | [Ruff](https://docs.astral.sh/ruff/) | Линтер + форматтер | `uv run ruff check .` |
 | | | `uv run ruff format --check .` |
 | [mypy](https://mypy-lang.org/) | Тайпчекер (гейт) | `uv run mypy src` |
-| [ty](https://docs.astral.sh/ty/) | Тайпчекер (Astral) | `uv run ty check src tests` |
-| [Pyrefly](https://pyrefly.org/) | Тайпчекер (Meta) | `uv run pyrefly check --min-severity warn` |
+| [ty](https://docs.astral.sh/ty/) | Тайпчекер (Astral, гейт) | `uv run ty check src tests` |
+| [Pyrefly](https://pyrefly.org/) | Тайпчекер (Meta, гейт) | `uv run pyrefly check --min-severity warn` |
 
 > **Примечание о счётчике «suppressed» в pyrefly:** в сводке строка
 > `N suppressed` не равна числу реально скрытых диагностик — директивы

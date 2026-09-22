@@ -29,3 +29,7 @@ class BrokerNameDuplicateError(BrokerError):
 
 class BrokerAccountHasTransactionsError(BrokerError):
     """Deleting an account that has transactions."""
+
+
+class BrokerAccountHasOperationsError(BrokerError):
+    """Deleting an account that has account operations."""

@@ -18,7 +18,9 @@ Domain rules:
 * A broker with accounts cannot be deleted
   (:class:`~bond_accounting.brokers.exceptions.BrokerHasAccountsError`), and
   an account with transactions cannot be deleted
-  (:class:`~bond_accounting.brokers.exceptions.BrokerAccountHasTransactionsError`).
+  (:class:`~bond_accounting.brokers.exceptions.BrokerAccountHasTransactionsError`)
+  — likewise an account with account operations
+  (:class:`~bond_accounting.brokers.exceptions.BrokerAccountHasOperationsError`).
 
 Subscriber note: handlers run asynchronously on the bus's dispatcher
 tasks (separate from the publisher), so a handler may start before the
@@ -43,13 +45,14 @@ from bond_accounting.brokers.dto import (
     BrokerUpdate,
 )
 from bond_accounting.brokers.exceptions import (
+    BrokerAccountHasOperationsError,
     BrokerAccountHasTransactionsError,
     BrokerAccountNotFoundError,
     BrokerHasAccountsError,
     BrokerNameDuplicateError,
     BrokerNotFoundError,
 )
-from bond_accounting.db.models import Broker, BrokerAccount, Transaction
+from bond_accounting.db.models import AccountOperation, Broker, BrokerAccount, Transaction
 from bond_accounting.event_bus import EventBus, Topic
 
 if TYPE_CHECKING:
@@ -428,6 +431,8 @@ class BrokerService:
             BrokerAccountNotFoundError: If the account is owned by another user.
             BrokerAccountHasTransactionsError: If the account has at least
                 one transaction.
+            BrokerAccountHasOperationsError: If the account has at least one
+                account operation.
             RuntimeError: If the event bus is not running; the deletion is
                 rolled back and no DB change occurs.
         """
@@ -449,6 +454,16 @@ class BrokerService:
                 raise BrokerAccountHasTransactionsError(
                     f"Broker account {account_id} has {has_txns} "
                     "transaction(s) and cannot be deleted"
+                )
+            has_ops = await session.scalar(
+                select(func.count())
+                .select_from(AccountOperation)
+                .where(AccountOperation.broker_account_id == account_id)
+            )
+            if has_ops:
+                raise BrokerAccountHasOperationsError(
+                    f"Broker account {account_id} has {has_ops} "
+                    "account operation(s) and cannot be deleted"
                 )
             await session.delete(account)
             try:

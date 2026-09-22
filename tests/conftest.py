@@ -12,6 +12,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from fastapi import FastAPI
 
+from bond_accounting.account_operations.service import AccountOperationService
 from bond_accounting.analytics import AnalyticsService
 from bond_accounting.api import api_router, build_api_dependencies, register_exception_handlers
 from bond_accounting.auth import AuthService, JwtService, PasswordHasher
@@ -137,6 +138,7 @@ def app(
     broker_service = BrokerService(session_factory, event_bus)
     portfolio_service = PortfolioService(session_factory, event_bus)
     analytics_service = AnalyticsService(session_factory, event_bus)
+    account_operation_service = AccountOperationService(session_factory)
 
     application = FastAPI()
     application.include_router(api_router)
@@ -149,6 +151,7 @@ def app(
             broker_service,
             portfolio_service,
             analytics_service,
+            account_operation_service,
         ).overrides()
     )
     return application

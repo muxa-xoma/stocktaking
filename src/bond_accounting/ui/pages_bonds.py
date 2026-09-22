@@ -11,7 +11,7 @@ from nicegui import ui
 
 from bond_accounting.bonds.dto import BondCreate, BondUpdate
 from bond_accounting.ui.base_page import BasePage
-from bond_accounting.ui.common import fmt_date, page_header, parse_date
+from bond_accounting.ui.common import fmt_date, page_header, parse_date, style_table
 from bond_accounting.ui.crud_mixin import CrudPageMixin
 
 if TYPE_CHECKING:
@@ -55,16 +55,20 @@ class _BondsState:
 
     Создаётся в :meth:`BondsPage.render` в локальной области видимости и
     передаётся первым аргументом в общие методы :class:`CrudPageMixin`
-    (поля ``cache``, ``selected_id``, ``table``, ``selected_label``,
-    ``delete_dialog`` — часть интерфейса миксина). Виджетные поля заполняются
-    по мере построения страницы в :meth:`render`.
+    (поля ``cache``, ``selected_id``, ``table``, ``create_dialog``,
+    ``edit_dialog``, ``confirm_delete_dialog`` — часть интерфейса миксина).
+    Виджетные поля заполняются по мере построения страницы в
+    :meth:`render`.
     """
 
     owner_id: int
     cache: dict[int, Any]
     selected_id: int | None
     table: Any = None
-    selected_label: Any = None
+    create_dialog: Any = None
+    edit_dialog: Any = None
+    confirm_delete_dialog: Any = None
+    confirm_message: Any = None
     isin_input: Any = None
     name_input: Any = None
     nominal_input: Any = None
@@ -78,7 +82,6 @@ class _BondsState:
     edit_frequency: Any = None
     edit_maturity: Any = None
     edit_issuer: Any = None
-    delete_dialog: Any = None
 
 
 def _is_valid_isin(value: str | None) -> bool:
@@ -107,7 +110,7 @@ class BondsPage(BasePage, CrudPageMixin):
     entity_accusative: ClassVar[str] = "облигацию"
     entity_genitive: ClassVar[str] = "облигации"
     selected_verb: ClassVar[str] = "Выбрана облигация:"
-    no_selection_text: ClassVar[str] = "Облигация не выбрана — отметьте строку в таблице"
+    no_selection_text: ClassVar[str] = "Облигация не выбрана — кликните по строке в таблице"
     name_required_message: ClassVar[str] = "Название обязательно"
     created_suffix: ClassVar[str] = "добавлена"
     updated_suffix: ClassVar[str] = "обновлена"
@@ -150,6 +153,9 @@ class BondsPage(BasePage, CrudPageMixin):
         state.edit_frequency.value = entity.coupon_frequency
         state.edit_maturity.value = entity.maturity_date.isoformat()
         state.edit_issuer.value = entity.issuer or ""
+        state.confirm_message.set_text(
+            f"Вы уверены, что хотите удалить {self.entity_accusative} '{entity.name}'?"
+        )
 
     def _entity_name(self, entity: Any) -> str:
         """Краткое имя облигации — её ISIN."""
@@ -209,70 +215,79 @@ class BondsPage(BasePage, CrudPageMixin):
             logger.info("UI: удалена облигация id=%s", entity_id)
         return deleted
 
+    def _reset_create_form(self, state: _BondsState) -> None:
+        state.isin_input.value = None
+        state.name_input.value = None
+        state.nominal_input.value = 1000
+        state.coupon_rate_input.value = None
+        state.frequency_select.value = "ANNUAL"
+        state.maturity_input.value = None
+        state.issuer_input.value = None
+
     # -- Страница ------------------------------------------------------------
 
     async def render(self, user: TokenPayload) -> None:
-        """Таблица облигаций, форма создания и форма правки/удаления выбранной."""
+        """Таблица облигаций и модальные окна создания/правки/удаления."""
         #: State создаётся до построения виджетов, чтобы обработчики (связанные
         #: через ``functools.partial``) ссылались на уже существующий объект
         #: ещё в момент построения кнопок.
         state = _BondsState(owner_id=user.user_id, cache={}, selected_id=None)
 
         page_header("/bonds")
-        with ui.column().classes("w-full max-w-5xl mx-auto gap-6"):
-            ui.label("Облигации").classes("text-h5")
-            table = ui.table(
-                columns=_COLUMNS,
-                rows=[],
-                row_key="id",
-                selection="single",
-            ).classes("w-full")
+        with ui.column().classes("w-full gap-6"):
+            with ui.row().classes("w-full items-center justify-between"):
+                ui.label("Облигации").classes("text-h5")
+                ui.button(
+                    "Добавить", icon="add", on_click=partial(self._open_create_dialog, state)
+                ).props("color=primary")
+
+            table = ui.table(columns=_COLUMNS, rows=[], row_key="id")
+            style_table(table)
             state.table = table
 
-            with ui.card().classes("w-full"):
-                ui.label("Новая облигация").classes("text-subtitle1")
-                with ui.row().classes("w-full items-start gap-2"):
-                    state.isin_input = ui.input("ISIN", validation=_ISIN_RULES)
-                    state.name_input = ui.input("Название")
-                    state.nominal_input = ui.number("Номинал", value=1000, min=1)
-                    state.coupon_rate_input = ui.number("Купонная ставка, %")
-                    state.frequency_select = ui.select(
-                        _FREQUENCY_OPTIONS, value="ANNUAL", label="Частота купона"
-                    )
-                    state.maturity_input = ui.date_input("Дата погашения")
-                    state.issuer_input = ui.input("Эмитент (необязательно)")
-                ui.button("Добавить", icon="add", on_click=partial(self._handle_create, state))
+        with ui.dialog() as create_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.create_dialog = create_dialog
+            ui.label("Новая облигация").classes("text-h6")
+            with ui.column().classes("w-full gap-2"):
+                state.isin_input = ui.input("ISIN", validation=_ISIN_RULES)
+                state.name_input = ui.input("Название")
+                state.nominal_input = ui.number("Номинал", value=1000, min=1)
+                state.coupon_rate_input = ui.number("Купонная ставка, %")
+                state.frequency_select = ui.select(
+                    _FREQUENCY_OPTIONS, value="ANNUAL", label="Частота купона"
+                )
+                state.maturity_input = ui.date_input("Дата погашения")
+                state.issuer_input = ui.input("Эмитент (необязательно)")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Готово", icon="check", on_click=partial(self._handle_create, state))
+                ui.button("Отмена", on_click=create_dialog.close).props("flat")
 
-            with ui.card().classes("w-full"):
-                state.selected_label = ui.label(
-                    "Облигация не выбрана — отметьте строку в таблице"
-                ).classes("text-subtitle1")
-                with ui.row().classes("w-full items-start gap-2"):
-                    state.edit_name = ui.input("Название")
-                    state.edit_nominal = ui.number("Номинал")
-                    state.edit_rate = ui.number("Купонная ставка, %")
-                    state.edit_frequency = ui.select(_FREQUENCY_OPTIONS, label="Частота купона")
-                    state.edit_maturity = ui.date_input("Дата погашения")
-                    state.edit_issuer = ui.input("Эмитент (необязательно)")
-                with ui.row().classes("gap-2"):
-                    ui.button(
-                        "Сохранить изменения",
-                        icon="save",
-                        on_click=partial(self._handle_update, state),
-                    )
-                    ui.button(
-                        "Удалить", icon="delete", on_click=partial(self._handle_delete, state)
-                    ).props("color=negative")
+        with ui.dialog() as edit_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.edit_dialog = edit_dialog
+            ui.label("Редактирование облигации").classes("text-h6")
+            with ui.column().classes("w-full gap-2"):
+                state.edit_name = ui.input("Название")
+                state.edit_nominal = ui.number("Номинал")
+                state.edit_rate = ui.number("Купонная ставка, %")
+                state.edit_frequency = ui.select(_FREQUENCY_OPTIONS, label="Частота купона")
+                state.edit_maturity = ui.date_input("Дата погашения")
+                state.edit_issuer = ui.input("Эмитент (необязательно)")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Сохранить", icon="save", on_click=partial(self._handle_update, state))
+                ui.button(
+                    "Удалить", icon="delete", on_click=partial(self._handle_delete, state)
+                ).props("color=negative")
+                ui.button("Отмена", on_click=edit_dialog.close).props("flat")
 
-            with ui.dialog() as delete_dialog, ui.card():
-                state.delete_dialog = delete_dialog
-                ui.label("Удалить выбранную облигацию?")
-                with ui.row():
-                    ui.button("Удалить", on_click=partial(self._confirm_delete, state)).props(
-                        "color=negative"
-                    )
-                    ui.button("Отмена", on_click=delete_dialog.close).props("flat")
+        with ui.dialog() as confirm_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
+            state.confirm_delete_dialog = confirm_dialog
+            state.confirm_message = ui.label("")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Да", on_click=partial(self._confirm_delete, state)).props(
+                    "color=negative"
+                )
+                ui.button("Нет", on_click=confirm_dialog.close).props("flat")
 
-        table.on_select(partial(self._on_table_select, state))
+        table.on("rowClick", partial(self._on_table_select, state))
 
         await self._reload(state)

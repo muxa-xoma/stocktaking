@@ -23,6 +23,7 @@ from nicegui.functions.notify import notify
 from nicegui.testing import User
 from nicegui.testing.general import nicegui_reset_globals, prepare_simulation
 
+from bond_accounting.account_operations.service import AccountOperationService
 from bond_accounting.analytics.service import AnalyticsService
 from bond_accounting.auth.service import AuthService
 from bond_accounting.bonds.service import BondService
@@ -118,6 +119,12 @@ def analytics_service() -> AnalyticsService:
     return create_autospec(AnalyticsService, instance=True)
 
 
+@pytest.fixture
+def account_operation_service() -> AccountOperationService:
+    """Мок CRUD-сервиса операций по счёту."""
+    return create_autospec(AccountOperationService, instance=True)
+
+
 class SimUser(User):
     """``User`` с фиксой для fire-and-forget ``run_javascript``.
 
@@ -205,6 +212,7 @@ async def ui_user(
     broker_service: BrokerService,
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
+    account_operation_service: AccountOperationService,
 ) -> AsyncGenerator[SimUser]:
     """Пользователь NiceGUI user simulation: реальный UI + моки сервисов.
 
@@ -226,6 +234,7 @@ async def ui_user(
                 broker_service=broker_service,
                 portfolio_service=portfolio_service,
                 analytics_service=analytics_service,
+                account_operation_service=account_operation_service,
             )
             async with (
                 core.app.router.lifespan_context(core.app),

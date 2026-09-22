@@ -95,7 +95,7 @@ def authenticate(user: User, token: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _fire(user: User, element: Any, event_type: str, args: dict) -> None:
+def _fire(user: User, element: Any, event_type: str, args: dict | list) -> None:
     """Вызвать обработчики события ``event_type`` элемента (как UserInteraction.trigger)."""
     client = user.client
     assert client is not None, "user simulation client is not started"

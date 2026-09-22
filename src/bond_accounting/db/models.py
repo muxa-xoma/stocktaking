@@ -6,6 +6,8 @@ Tables:
     * ``bonds`` — bond instruments.
     * ``broker_accounts`` — a user's account at a specific broker.
     * ``transactions`` — buy/sell/maturity operations on bonds.
+    * ``account_operations`` — non-trading money movements on a broker
+      account (deposits, withdrawals, taxes).
 
 Position semantics (no ``position`` column is stored — it is always derived):
 
@@ -35,6 +37,12 @@ COUPON_FREQUENCIES = ("ANNUAL", "SEMI_ANNUAL", "QUARTERLY")
 #: Allowed values for :attr:`BrokerAccount.account_type` (enforced by a CHECK constraint).
 BROKER_ACCOUNT_TYPES = ("STANDARD", "IIS", "LTD")
 
+#: Allowed values for :attr:`AccountOperation.type` (enforced by a CHECK constraint).
+ACCOUNT_OPERATION_TYPES = ("DEPOSIT", "WITHDRAWAL", "TAX")
+
+#: Allowed values for :attr:`Broker.min_commission_type` (enforced by a CHECK constraint).
+MIN_COMMISSION_TYPES = ("PERCENT", "RUBLES")
+
 
 class User(Base):
     """Application user authenticated via JWT."""
@@ -55,6 +63,11 @@ class User(Base):
         # Broker accounts are deleted together with the user.
         cascade="all, delete-orphan",
     )
+    account_operations: Mapped[list[AccountOperation]] = relationship(
+        back_populates="user",
+        # All operations are deleted together with the user.
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"User(id={self.id!r}, username={self.username!r})"
@@ -64,11 +77,25 @@ class Broker(Base):
     """Brokerage company with its commission settings."""
 
     __tablename__ = "brokers"
+    __table_args__ = (
+        CheckConstraint(
+            "min_commission_type IN ('PERCENT', 'RUBLES')",
+            name="ck_brokers_min_commission_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     commission: Mapped[float] = mapped_column(Float, default=0.0)
     min_commission: Mapped[float | None] = mapped_column(Float, default=None)
+    # Python-side ``default`` plus a DB-level ``server_default`` so rows
+    # inserted outside the ORM also get 'PERCENT' when the column is omitted
+    # (same pattern as ``Bond.nominal``).
+    min_commission_type: Mapped[str] = mapped_column(
+        String(10),
+        default="PERCENT",
+        server_default="PERCENT",
+    )
     description: Mapped[str | None] = mapped_column(String(1000), default=None)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime,
@@ -163,6 +190,11 @@ class BrokerAccount(Base):
         # All operations are deleted together with the account.
         cascade="all, delete-orphan",
     )
+    account_operations: Mapped[list[AccountOperation]] = relationship(
+        back_populates="broker_account",
+        # All operations are deleted together with the account.
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return (
@@ -214,4 +246,48 @@ class Transaction(Base):
             f"broker_account_id={self.broker_account_id!r}, type={self.type!r}, "
             f"quantity={self.quantity!r}, price={self.price!r}, "
             f"date={self.date!r}, commission={self.commission!r})"
+        )
+
+
+class AccountOperation(Base):
+    """A non-trading money movement on a broker account.
+
+    ``type`` is restricted to :data:`ACCOUNT_OPERATION_TYPES`
+    (``DEPOSIT``, ``WITHDRAWAL``, ``TAX``) by a CHECK constraint. ``amount``
+    must be positive; this is validated at the API/service layer (Pydantic),
+    not by the database.
+    """
+
+    __tablename__ = "account_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('DEPOSIT', 'WITHDRAWAL', 'TAX')",
+            name="ck_account_operations_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    broker_account_id: Mapped[int] = mapped_column(
+        ForeignKey("broker_accounts.id"),
+        index=True,
+    )
+    type: Mapped[str] = mapped_column(String(10))
+    # Positive amount enforced at the service layer (Pydantic), not in the DB.
+    amount: Mapped[float] = mapped_column(Float)
+    date: Mapped[datetime.date] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(String(500), default=None)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+    )
+
+    user: Mapped[User] = relationship(back_populates="account_operations")
+    broker_account: Mapped[BrokerAccount] = relationship(back_populates="account_operations")
+
+    def __repr__(self) -> str:
+        return (
+            f"AccountOperation(id={self.id!r}, user_id={self.user_id!r}, "
+            f"broker_account_id={self.broker_account_id!r}, type={self.type!r}, "
+            f"amount={self.amount!r}, date={self.date!r})"
         )

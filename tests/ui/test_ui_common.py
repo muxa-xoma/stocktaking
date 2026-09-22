@@ -99,15 +99,18 @@ async def test_protected_page_redirects_invalid_token(ui_user) -> None:
 async def test_navbar_rendered_for_authenticated_user(
     ui_user, valid_token, portfolio_service, bond_service
 ) -> None:
-    """Шапка с навигацией и кнопкой выхода видна авторизованному."""
+    """Drawer с брендом «Home Stocktaking», навигацией и кнопкой выхода."""
     portfolio_service.get_all_positions.return_value = []
     bond_service.list_all.return_value = []
     authenticate(ui_user, valid_token)
 
     await ui_user.open("/")
-    await ui_user.should_see("Bond Accounting")
+    await ui_user.should_see("Home Stocktaking")
+    await ui_user.should_see("Портфель")
     await ui_user.should_see("Облигации")
+    await ui_user.should_see("Счета")
     await ui_user.should_see("Сделки")
+    await ui_user.should_see("Операции")
     await ui_user.should_see("Аналитика")
     await ui_user.should_see("Выйти")
 
@@ -142,12 +145,12 @@ async def test_notify_error_shows_negative_notification(ui_user) -> None:
 async def test_navbar_rendered_on_bonds_and_transactions_pages(
     ui_user, valid_token, bond_service, portfolio_service
 ) -> None:
-    """Пункты навигации и «Выйти» видны на каждой защищённой странице."""
+    """Drawer с брендом и «Выйти» виден на каждой защищённой странице."""
     bond_service.list_all.return_value = []
     portfolio_service.list_transactions.return_value = []
     authenticate(ui_user, valid_token)
 
     for path in ["/bonds", "/transactions"]:
         await ui_user.open(path)
-        await ui_user.should_see("Bond Accounting")
+        await ui_user.should_see("Home Stocktaking")
         await ui_user.should_see("Выйти")

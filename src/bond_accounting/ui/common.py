@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nicegui import context, ui
 
@@ -32,8 +32,74 @@ _NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("/brokers", "Брокеры"),
     ("/accounts", "Счета"),
     ("/transactions", "Сделки"),
+    ("/operations", "Операции"),
     ("/analytics", "Аналитика"),
 )
+
+#: Класс полноширинной таблицы: без ограничения ``max-w-*`` по ширине.
+FULL_WIDTH_TABLE = "w-full"
+
+#: CSS тёмной темы «Глубокая ночь»: фон ``#0f172a``, поверхности ``#1e293b``.
+_DARK_THEME_CSS = """
+<style>
+:root {
+    --brand-accent: #38bdf8;
+}
+body {
+    background-color: #0f172a !important;
+    color: #e2e8f0;
+}
+.nicegui-card,
+.q-card {
+    background-color: #1e293b !important;
+    color: #e2e8f0;
+}
+/* Оверлеи Quasar: с включённым Dark-плагином их дефолтная тёмная
+палитра (#1d1d1d) выравнивается под «Глубокую ночь»; без !important
+Quasar-правила ``.body--dark …`` перебивают эти селекторы. */
+.q-dialog .q-card,
+.nicegui-dialog .q-card {
+    background-color: #1e293b !important;
+    color: #e2e8f0;
+}
+.q-menu {
+    background-color: #1e293b !important;
+    color: #e2e8f0;
+}
+.q-date {
+    background-color: #1e293b !important;
+    color: #e2e8f0;
+}
+.q-date__header {
+    background-color: var(--brand-accent);
+    color: #0f172a;
+}
+.q-date__navigation {
+    color: #e2e8f0;
+}
+.q-field .q-field__native,
+.q-field .q-field__prefix,
+.q-field .q-field__suffix,
+.q-field input {
+    color: #e2e8f0;
+    caret-color: var(--brand-accent);
+}
+</style>
+"""
+
+
+def apply_dark_theme() -> None:
+    """Включить тёмный режим Quasar и инъекцировать палитру «Глубокая ночь».
+
+    Quasar-плагин Dark красит нативные оверлеи (диалоги, меню, календарь),
+    а собственный CSS ``_DARK_THEME_CSS`` приводит их и фон страницы к
+    палитре B: фон ``#0f172a``, поверхности ``#1e293b``, текст
+    ``#e2e8f0``.
+    Вызывается из ``page_header`` и со страниц входа/регистрации, которые
+    общую шапку не используют.
+    """
+    ui.dark_mode(True)
+    ui.add_head_html(_DARK_THEME_CSS)
 
 
 def get_current_user(jwt_service: JwtService) -> TokenPayload | None:
@@ -195,26 +261,76 @@ def notify_error(exc: BaseException) -> None:
 
 
 def page_header(active_path: str) -> None:
-    """Отрисовать шапку с навигацией для защищённых страниц.
+    """Отрисовать боковое меню (левый drawer) для защищённых страниц.
+
+    Вместо верхней панели используется постоянный левый drawer: сверху
+    бренд «Home Stocktaking», ниже — пункты навигации (текущий выделен
+    акцентным цветом), внизу — кнопка выхода. Одновременно со шапкой
+    включается тёмный режим Quasar (без Dark-плагина нативные
+    диалоги/меню/календари рендерятся светлой палитрой) и инъекцируется
+    CSS тёмной темы «Глубокая ночь» (фон ``#0f172a``, поверхности
+    ``#1e293b``, акценты ``#38bdf8`` / ``#818cf8``).
+
+    Имя сохранено ради совместимости с существующими страницами, которые
+    вызывают ``page_header(active_path)`` в начале ``render()``.
 
     Args:
         active_path: Путь текущей страницы; соответствующий пункт
             навигации выделяется.
     """
-    with ui.header().classes("items-center gap-6"):
-        ui.label("Bond Accounting").classes("text-h6")
-        for path, title in _NAV_ITEMS:
-            link = ui.link(title, path).classes("no-underline")
-            if path == active_path:
-                link.classes("text-bold")
+    apply_dark_theme()
+    with (
+        ui.left_drawer(value=True, fixed=False)
+        .props("bordered")
+        .classes("bg-[#0f172a] text-[#e2e8f0] gap-0"),
+        ui.column().classes("h-full w-full gap-0"),
+    ):
+        ui.label("Home Stocktaking").classes("text-h6 text-[#e2e8f0] px-4 py-4")
+        ui.separator().classes("bg-[#1e293b]")
+        with ui.column().classes("gap-0 pt-2"):
+            for path, title in _NAV_ITEMS:
+                link = ui.link(title, path).classes("no-underline px-4 py-2")
+                if path == active_path:
+                    link.classes("text-bold text-[#38bdf8]")
+                else:
+                    link.classes("text-[#e2e8f0]")
         ui.space()
-        ui.button("Выйти", on_click=_logout).props("flat")
+        ui.button("Выйти", on_click=_logout).props("flat").classes("text-[#818cf8]")
+
+
+def style_table(table: ui.table) -> None:
+    """Растянуть таблицу на всю ширину и включить разделители ячеек.
+
+    Убирает ограничения ``max-w-*`` (например, ``max-w-5xl``), добавляет
+    ``w-full`` и Quasar-проп ``separator=cell``.
+
+    Args:
+        table: Таблица, которая должна занимать всю ширину контейнера.
+    """
+    table.classes(FULL_WIDTH_TABLE, remove="max-w-5xl max-w-4xl max-w-3xl max-w-2xl max-w-xl")
+    table.props("separator=cell")
 
 
 def _logout() -> None:
     """Сбросить cookie сессии и вернуться на страницу входа."""
     clear_token_cookie()
     ui.navigate.to("/login")
+
+
+def row_from_event(e: Any, row_key: str) -> dict[str, Any] | None:
+    """Извлечь строку таблицы из аргументов события клика по строке.
+
+    Quasar ``rowClick(evt, row, index)`` доезжает в обработчик списком
+    аргументов (DOM-событие сериализуется в dict, строка — в dict,
+    индекс — в число), поэтому строка ищется как первый dict с ключом
+    ``row_key``.
+    """
+    args = getattr(e, "args", None)
+    items = args if isinstance(args, (list, tuple)) else [args]
+    for item in items:
+        if isinstance(item, dict) and row_key in item:
+            return item
+    return None
 
 
 def parse_date(value: str | None, field: str) -> date:
@@ -243,11 +359,6 @@ def fmt_money(value: float | None) -> str:
 def fmt_percent(value: float | None) -> str:
     """Отформатировать долю (например, ``0.05``) как проценты."""
     return "—" if value is None else f"{value:.2%}"
-
-
-def fmt_raw_percent(value: float | None) -> str:
-    """Отформатировать процентное значение (например, ``5.0``) с двумя знаками после запятой."""
-    return "—" if value is None else f"{value:.2f}%"
 
 
 def fmt_date(value: date | None) -> str:

@@ -24,6 +24,8 @@ class Topic:
     BROKER_ACCOUNT_UPDATED = "broker_account.updated"
     BROKER_ACCOUNT_DELETED = "broker_account.deleted"
     TRANSACTION_CREATED = "transaction.created"
+    TRANSACTION_UPDATED = "transaction.updated"
+    TRANSACTION_DELETED = "transaction.deleted"
     POSITION_UPDATED = "position.updated"
     PORTFOLIO_RECALCULATED = "portfolio.recalculated"
 
@@ -42,6 +44,8 @@ ALL_TOPICS: frozenset[str] = frozenset(
         Topic.BROKER_ACCOUNT_UPDATED,
         Topic.BROKER_ACCOUNT_DELETED,
         Topic.TRANSACTION_CREATED,
+        Topic.TRANSACTION_UPDATED,
+        Topic.TRANSACTION_DELETED,
         Topic.POSITION_UPDATED,
         Topic.PORTFOLIO_RECALCULATED,
     }

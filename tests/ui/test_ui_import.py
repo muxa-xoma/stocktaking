@@ -23,6 +23,7 @@ EXPECTED_ROUTES = {
     "/brokers",
     "/accounts",
     "/transactions",
+    "/operations",
     "/analytics",
 }
 
@@ -36,6 +37,7 @@ def test_create_ui_app_registers_all_pages() -> None:
         broker_service=MagicMock(),
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
+        account_operation_service=MagicMock(),
     )
 
     registered = {getattr(route, "path", None) for route in nicegui_app.routes}
@@ -52,5 +54,6 @@ def test_create_ui_app_returns_none() -> None:
         broker_service=MagicMock(),
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
+        account_operation_service=MagicMock(),
     )
     assert result is None
