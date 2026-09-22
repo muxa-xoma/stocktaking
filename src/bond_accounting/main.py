@@ -71,8 +71,27 @@ __all__ = ["main", "run"]
 logger = logging.getLogger(__name__)
 
 #: How long to wait for the NiceGUI/uvicorn server thread to finish after a
-#: shutdown request before giving up on a graceful stop.
+# shutdown request before giving up on a graceful stop.
 _SERVER_SHUTDOWN_TIMEOUT_S = 15.0
+
+#: Level names accepted by uvicorn's ``LOG_LEVELS`` lookup (uvicorn/config.py);
+# note that ``trace`` is uvicorn-only and ``NOTSET`` is Python-logging-only.
+_UVICORN_LEVELS = ("critical", "error", "warning", "info", "debug", "trace")
+
+
+def _uvicorn_level(level: str) -> str:
+    """Map a Python logging level name to a valid uvicorn ``log_level``.
+
+    uvicorn looks up ``LOG_LEVELS[name.lower()]`` and raises ``KeyError`` for
+    unknown names, and ``LoggingConfig.level`` may legitimately be ``NOTSET``
+    (valid for Python logging, unknown to uvicorn), so fall back to ``info``
+    with a warning instead of crashing server startup.
+    """
+    lowered = level.lower()
+    if lowered in _UVICORN_LEVELS:
+        return lowered
+    logger.warning("logging.level %r is not a valid uvicorn level; falling back to 'info'", level)
+    return "info"
 
 
 def _find_alembic_dir() -> Path | None:
@@ -202,7 +221,13 @@ async def main(config_path: str | None = None) -> None:
                     fastapi_docs=True,
                     reload=False,
                     show=False,
-                    uvicorn_logging_level="info",
+                    # log_config=None is a stock uvicorn.Config parameter (not a
+                    # NiceGUI API) forwarded via ui.run(**kwargs): uvicorn skips
+                    # its own dictConfig, so uvicorn/nicegui records propagate
+                    # into the root handler set up by setup_logging().
+                    log_config=None,
+                    uvicorn_logging_level=_uvicorn_level(settings.logging.level),
+                    show_welcome_message=False,
                 )
             )
             stop_task = asyncio.create_task(stop_requested.wait())

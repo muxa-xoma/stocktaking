@@ -113,6 +113,12 @@ machine-readable JSON logs (via `python-json-logger`'s msgspec backend) with
 all standard fields plus any `extra=` kwargs; `format: "text"` emits
 human-readable lines like
 `2026-09-20 12:00:00 | INFO | bond_accounting.bonds | message | key=value`.
+Known third-party loggers (uvicorn server + access, nicegui, sqlalchemy,
+alembic, fastapi) are forcibly reset so their records flow through the single
+root handler in the configured format and level (including JSON access logs
+with `client_addr` / `request_line` / `status_code` extras); PyJWT's
+`InsecureKeyLengthWarning` is captured to the `bond_accounting.pyjwt_warnings`
+logger while all other warnings keep their default behaviour.
 
 Environment variables use the `BOND_` prefix and `__` to separate nesting
 levels:
@@ -235,7 +241,7 @@ uv run pytest -q --cov=bond_accounting --cov-report=term-missing
 
 This prints per-module line coverage with the uncovered line numbers. Add
 `--cov-report=html` to get a browsable HTML report in `htmlcov/`. The current
-line coverage of `bond_accounting/` is about 91% (538 tests, 90.77% line
+line coverage of `bond_accounting/` is about 91% (557 tests, 90.60% line
 coverage). The entry point `main.py` is not exercised by tests (it is
 verified by actually running the application); without `main.py` the
 coverage is correspondingly higher.

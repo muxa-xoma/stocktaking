@@ -208,7 +208,8 @@ class LoggingConfig(BaseModel):
         upper = value.upper()
         if upper not in logging.getLevelNamesMapping():
             raise ValueError(
-                f"Unknown logging level {value!r}; expected one of DEBUG, INFO, WARNING, ERROR, CRITICAL (or NOTSET)"
+                f"Unknown logging level {value!r}; expected one of "
+                "DEBUG, INFO, WARNING, ERROR, CRITICAL (or NOTSET)"
             )
         return upper
 
@@ -226,7 +227,8 @@ class _YamlSettingsSource(YamlConfigSettingsSource):
             raise ConfigError(f"Cannot read config file {file_path}: {exc}") from exc
         if data is not None and not isinstance(data, dict):
             raise ConfigError(
-                f"Config file {file_path} must contain a YAML mapping at the top level, got {type(data).__name__}"
+                f"Config file {file_path} must contain a YAML mapping at the top level, "
+                f"got {type(data).__name__}"
             )
         return data
 

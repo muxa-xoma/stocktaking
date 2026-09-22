@@ -97,7 +97,7 @@ re-exported from each package's `__init__.py`.
 
 | Module | Responsibility | Public interface | Depends on |
 |---|---|---|---|
-| `config` | Settings from YAML + `BOND_*` env vars (pydantic-settings); logging setup | `load_settings()`, `Settings`, `AppConfig`, `DatabaseConfig`, `AuthConfig`, `EventBusConfig`, `LoggingConfig`; logging is configured via `bond_accounting.config.logging_setup.setup_logging()` (not re-exported through the package `__all__`) | — |
+| `config` | Settings from YAML + `BOND_*` env vars (pydantic-settings); logging setup incl. third-party logger unification | `load_settings()`, `Settings`, `AppConfig`, `DatabaseConfig`, `AuthConfig`, `EventBusConfig`, `LoggingConfig`; logging is configured via `bond_accounting.config.logging_setup.setup_logging()` and `reset_third_party_loggers()` (public, not re-exported through the package `__all__`) — both reset known third-party loggers (uvicorn, nicegui, sqlalchemy, alembic, fastapi) so their records flow through the single root handler | — |
 | `db` | SQLAlchemy 2.0 async ORM: models, engine & session factories | `Base`, `User`, `Bond`, `Transaction`, `AccountOperation`, `create_engine_from_settings()`, `create_session_factory()`. The models also include `Broker` and `BrokerAccount` (defined in `db/models.py`, but not re-exported through the package `__all__`) | `config` |
 | `auth` | Register/login service, JWT (HS256) issuing/verification, bcrypt hashing | `AuthService`, `JwtService`, `PasswordHasher`, `TokenPayload`, `AuthError`, `InvalidCredentialsError`, `UsernameTakenError`, `JwtError` | `db` |
 | `bonds` | Bond CRUD with EventBus publishing on change | `BondService`, `BondCreate`, `BondDTO`, `BondUpdate`, `BondError`, `BondNotFoundError`, `BondNotOwnedError`, `BondIsinDuplicateError`, `BondDeletionBlockedError` | `db`, `event_bus` |
@@ -134,6 +134,14 @@ re-exported from each package's `__init__.py`.
   never used in application code. `alembic/env.py` is async and resolves the
   database URL itself through `load_settings()`; `alembic.ini` deliberately
   contains no URL. `alembic upgrade head` runs in-process at startup.
+- **Unified third-party logging** — all known third-party loggers (uvicorn server + access,
+  nicegui, sqlalchemy, alembic, fastapi) are reset by `setup_logging()` / `reset_third_party_loggers()`
+  to propagate into the single root handler in the configured format and level. Uvicorn's own
+  `dictConfig` is disabled by passing `log_config=None` through `ui.run(**kwargs)`; the
+  `uvicorn_logging_level` comes from `settings.logging.level` with a `NOTSET`→`info` fallback,
+  and the NiceGUI welcome `print()` is silenced via `show_welcome_message=False`. PyJWT's
+  `InsecureKeyLengthWarning` is captured into the `bond_accounting.pyjwt_warnings` logger (one-time
+  `showwarning` wrapper, all other warnings delegate to the previous handler). See ADR-004.
 - **Event-driven analytics via in-process async pub/sub** — `bond.updated`,
   `bond.deleted`, `transaction.created`, `transaction.updated`,
   `transaction.deleted`, `position.updated`, `broker.*`,
