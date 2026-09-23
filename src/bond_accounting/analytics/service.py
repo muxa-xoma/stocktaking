@@ -64,16 +64,16 @@ from bond_accounting.analytics.dto import (
     PositionAnalytics,
     RealizedPnl,
 )
-from bond_accounting.db.models import Bond, Transaction
+from bond_accounting.db import Bond, BondCoupon, Transaction
 from bond_accounting.event_bus import Topic
 from bond_accounting.portfolio.netting import net_position, realized_pnl
 from bond_accounting.yield_calc import (
+    CouponPayment,
     YtmCalculationError,
     calculate_accrued_coupon,
     calculate_current_yield,
     calculate_ytm,
 )
-from bond_accounting.yield_calc.coupon_schedule import _add_months
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -86,20 +86,6 @@ logger = logging.getLogger(__name__)
 
 #: ``sender`` value stamped on every message published by this module.
 _SENDER = "analytics"
-
-#: Months per coupon period (calendar grid anchored on the maturity date).
-_FREQUENCY_MONTHS: dict[str, int] = {
-    "ANNUAL": 12,
-    "SEMI_ANNUAL": 6,
-    "QUARTERLY": 3,
-}
-
-#: Coupon periods per year for each supported frequency.
-_PERIODS_PER_YEAR: dict[str, int] = {
-    "ANNUAL": 1,
-    "SEMI_ANNUAL": 2,
-    "QUARTERLY": 4,
-}
 
 #: ``next_coupons`` horizon for the cached/published summary: coupon dates
 #: further than ~24 months from ``today`` are dropped. Users may request a
@@ -129,49 +115,54 @@ _CHANGE_TOPICS = (
 # --------------------------------------------------------------------- #
 
 
-def _future_coupon_dates(maturity_date: date, months: int, today: date) -> list[date]:
+def _future_coupon_dates(maturity_date: date, period_days: int, today: date) -> list[date]:
     """Coupon grid dates strictly after ``today``, ending with the maturity.
 
     Mirrors the ``yield_calc`` grid semantics: dates are produced by
-    stepping one coupon period back from ``maturity_date`` while staying
-    strictly after ``today`` (day-of-month clamped by ``_add_months``).
+    stepping ``period_days`` calendar days back from ``maturity_date``
+    while staying strictly after ``today``. A zero-coupon bond
+    (``period_days == 0``) has no coupon grid at all.
 
     Args:
         maturity_date: Bond maturity date.
-        months: Months per coupon period.
+        period_days: Calendar days between coupon payments.
         today: Valuation date.
 
     Returns:
         Chronologically ordered future coupon dates; the last entry is the
         maturity date itself (it doubles as the final coupon date). Empty
-        when ``maturity_date <= today``.
+        when ``maturity_date <= today`` or ``period_days <= 0``.
     """
+    if period_days <= 0:
+        return []
     dates: list[date] = []
     current = maturity_date
     while current > today:
         dates.append(current)
-        current = _add_months(current, -months)
-    dates.reverse()
-    return dates
+        current = current - timedelta(days=period_days)
+    return list(reversed(dates))
 
 
-def _last_coupon_date(maturity_date: date, months: int, today: date) -> date | None:
+def _last_coupon_date(maturity_date: date, period_days: int, today: date) -> date | None:
     """Latest coupon grid date strictly before ``today``, or ``None``.
 
     Args:
         maturity_date: Bond maturity date.
-        months: Months per coupon period.
+        period_days: Calendar days between coupon payments.
         today: Valuation date.
 
     Returns:
         The most recent coupon date before ``today`` on the grid anchored
-        on ``maturity_date``; ``None`` only for degenerate data (stepping
-        below :data:`_MIN_COUPON_DATE`), in which case the accrued coupon
-        is ``0.0``.
+        on ``maturity_date``; ``None`` for zero-coupon bonds
+        (``period_days <= 0``) or degenerate data (stepping below
+        :data:`_MIN_COUPON_DATE`), in which case the accrued coupon is
+        ``0.0``.
     """
+    if period_days <= 0:
+        return None
     current = maturity_date
     while current >= today:
-        current = _add_months(current, -months)
+        current = current - timedelta(days=period_days)
         if current < _MIN_COUPON_DATE:
             return None
     return current
@@ -184,9 +175,120 @@ def _coupon_per_period(bond: Bond) -> float:
         bond: Bond instrument.
 
     Returns:
-        ``nominal * coupon_rate / 100 / periods_per_year``.
+        ``nominal * coupon_rate / 100 * (coupon_period_days / 365)``;
+        ``0.0`` for zero-coupon bonds (``coupon_period_days == 0``).
     """
-    return bond.nominal * bond.coupon_rate / 100 / _PERIODS_PER_YEAR[bond.coupon_frequency]
+    if bond.coupon_period_days == 0:
+        return 0.0
+    return bond.nominal * bond.coupon_rate / 100 * (bond.coupon_period_days / 365)
+
+
+def _bond_position_cashflows(
+    coupon_rows: Sequence[BondCoupon], bond: Bond
+) -> list[CouponPayment] | None:
+    """Convert a stored coupon schedule into :class:`CouponPayment` items.
+
+    The maturity row carries the nominal on top of the coupon per the
+    :class:`~bond_accounting.yield_calc.coupon_schedule.CouponPayment`
+    contract. Returns ``None`` when the schedule is empty — in that case the
+    caller passes ``None`` and :mod:`yield_calc` derives the dates from
+    ``coupon_period_days``.
+
+    Args:
+        coupon_rows: Stored ``bond_coupons`` rows for one bond (may be empty).
+        bond: Bond instrument (for maturity date and nominal).
+
+    Returns:
+        A :class:`CouponPayment` list, or ``None`` when ``coupon_rows`` is
+        empty. A synthetic maturity payment (nominal only) is appended when
+        the schedule lacks a row exactly on the maturity date, so the YTM
+        cashflow list carries the principal rather than coupons only.
+    """
+    if not coupon_rows:
+        return None
+    cashflows: list[CouponPayment] = []
+    has_maturity_row = False
+    for coupon_row in coupon_rows:
+        is_final = coupon_row.coupon_date == bond.maturity_date
+        has_maturity_row = has_maturity_row or is_final
+        cashflows.append(
+            CouponPayment(
+                payment_date=coupon_row.coupon_date,
+                amount=coupon_row.coupon_amount + (bond.nominal if is_final else 0.0),
+                is_final=is_final,
+            )
+        )
+    if not has_maturity_row:
+        cashflows.append(
+            CouponPayment(
+                payment_date=bond.maturity_date,
+                amount=bond.nominal,
+                is_final=True,
+            )
+        )
+    return cashflows
+
+
+def _future_bond_cashflows(
+    bond: Bond,
+    quantity: int,
+    valuation_date: date,
+    horizon_end: date,
+) -> tuple[list[CouponDue], list[Cashflow]]:
+    """Build the upcoming coupon + maturity events for one open position.
+
+    Args:
+        bond: Bond instrument.
+        quantity: Held quantity of the bond.
+        valuation_date: Valuation date for the coupon grid.
+        horizon_end: Coupon dates past this date are dropped from
+            ``next_coupons`` (but kept in ``cashflows``).
+
+    Returns:
+        A tuple ``(next_coupons, cashflows)`` where ``next_coupons`` is
+        capped by ``horizon_end`` and ``cashflows`` carries the full
+        per-coupon plus one maturity entry (only when the maturity is still
+        in the future).
+    """
+    coupon_per_period = _coupon_per_period(bond)
+    future_dates = (
+        _future_coupon_dates(bond.maturity_date, bond.coupon_period_days, valuation_date)
+        if bond.maturity_date > valuation_date
+        else []
+    )
+    next_coupons: list[CouponDue] = []
+    cashflows: list[Cashflow] = []
+    for coupon_date in future_dates:
+        if coupon_date <= horizon_end:
+            next_coupons.append(
+                CouponDue(
+                    bond_id=bond.id,
+                    isin=bond.isin,
+                    name=bond.name,
+                    date=coupon_date,
+                    amount=coupon_per_period * quantity,
+                )
+            )
+        cashflows.append(
+            Cashflow(
+                date=coupon_date,
+                bond_id=bond.id,
+                isin=bond.isin,
+                kind="COUPON",
+                amount=coupon_per_period * quantity,
+            )
+        )
+    if bond.maturity_date > valuation_date:
+        cashflows.append(
+            Cashflow(
+                date=bond.maturity_date,
+                bond_id=bond.id,
+                isin=bond.isin,
+                kind="MATURITY",
+                amount=float(bond.nominal * quantity),
+            )
+        )
+    return next_coupons, cashflows
 
 
 def _position_of(txns: Sequence[Transaction]) -> tuple[int, float | None]:
@@ -236,7 +338,10 @@ def _realized_pnl_of(txns: Sequence[Transaction]) -> tuple[float, float, float]:
 
 
 def _build_position_analytics(
-    bond: Bond, txns: Sequence[Transaction], today: date
+    bond: Bond,
+    txns: Sequence[Transaction],
+    today: date,
+    cashflows: Sequence[CouponPayment] | None = None,
 ) -> PositionAnalytics:
     """Compute :class:`PositionAnalytics` for one open position.
 
@@ -246,6 +351,10 @@ def _build_position_analytics(
             ``(date, id)``. The position must be open (``quantity > 0``),
             which also guarantees a non-``None`` ``avg_buy_price``.
         today: Valuation date.
+        cashflows: Optional pre-loaded actual coupon schedule (from the
+            ``bond_coupons`` table), forwarded to ``calculate_ytm`` as the
+            authoritative dates/amounts. ``None`` lets ``yield_calc``
+            derive the schedule from ``bond.coupon_period_days``.
 
     Returns:
         Per-position analytics; yields are ``None`` for matured bonds.
@@ -255,10 +364,11 @@ def _build_position_analytics(
         # An open position implies at least one BUY; treat anything else as a
         # corrupt history rather than silently computing on None.
         raise ValueError(f"Open position for bond_id={bond.id} has no BUY transactions to average")
-    months = _FREQUENCY_MONTHS[bond.coupon_frequency]
     matured = bond.maturity_date <= today
 
-    future_dates = [] if matured else _future_coupon_dates(bond.maturity_date, months, today)
+    future_dates = (
+        [] if matured else _future_coupon_dates(bond.maturity_date, bond.coupon_period_days, today)
+    )
     next_coupon_date = future_dates[0] if future_dates else None
 
     ytm: float | None = None
@@ -268,10 +378,11 @@ def _build_position_analytics(
             ytm = calculate_ytm(
                 price=avg_buy_price,
                 coupon_rate=bond.coupon_rate,
-                coupon_frequency=bond.coupon_frequency,
+                coupon_period_days=bond.coupon_period_days,
                 maturity_date=bond.maturity_date,
                 nominal=bond.nominal,
                 today=today,
+                cashflows=list(cashflows) if cashflows is not None else None,
             )
             current_yield = calculate_current_yield(
                 price=avg_buy_price,
@@ -285,14 +396,14 @@ def _build_position_analytics(
                 avg_buy_price,
             )
 
-    last_coupon = _last_coupon_date(bond.maturity_date, months, today)
+    last_coupon = _last_coupon_date(bond.maturity_date, bond.coupon_period_days, today)
     if last_coupon is None:
         accrued_coupon = 0.0
     else:
         try:
             accrued_coupon = calculate_accrued_coupon(
                 bond.coupon_rate,
-                bond.coupon_frequency,
+                bond.coupon_period_days,
                 last_coupon,
                 today=today,
                 nominal=bond.nominal,
@@ -618,10 +729,57 @@ class AnalyticsService:
         )
         return summary.model_copy(deep=True)
 
+    async def _load_summary_inputs(
+        self, user_id: int, broker_account_id: int | None
+    ) -> tuple[list[Transaction], dict[int, Bond], dict[int, list[BondCoupon]]]:
+        """Load the transactions, bonds and coupon schedules for one user.
+
+        Args:
+            user_id: User whose portfolio inputs are loaded.
+            broker_account_id: When given, restrict transactions to this
+                broker account.
+
+        Returns:
+            A tuple ``(txns, bonds, coupons_by_bond)`` where ``txns`` is
+            ordered by ``(date, id)``, ``bonds`` maps bond id to bond, and
+            ``coupons_by_bond`` maps bond id to its stored coupon rows
+            ordered by ``coupon_date``. The coupon schedules of all of the
+            user's bonds are prefetched in ONE query (risk R4: no
+            per-position lazy loads).
+        """
+        async with self._session_factory() as session:
+            stmt = select(Transaction).where(Transaction.user_id == user_id)
+            if broker_account_id is not None:
+                stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
+            txn_result = await session.execute(stmt.order_by(Transaction.date, Transaction.id))
+            txns = list(txn_result.scalars().all())
+            bonds: dict[int, Bond] = {}
+            if txns:
+                bond_ids = {txn.bond_id for txn in txns}
+                bond_result = await session.execute(select(Bond).where(Bond.id.in_(bond_ids)))
+                bonds = {bond.id: bond for bond in bond_result.scalars().all()}
+
+            # Prefetch the actual coupon schedules for all of the user's
+            # bonds in ONE query (risk R4: no per-position lazy loads).
+            coupons_by_bond: dict[int, list[BondCoupon]] = {}
+            if bonds:
+                coupon_result = await session.execute(
+                    select(BondCoupon)
+                    .where(BondCoupon.bond_id.in_(bonds.keys()))
+                    .order_by(BondCoupon.bond_id, BondCoupon.coupon_date)
+                )
+                for coupon_row in coupon_result.scalars().all():
+                    coupons_by_bond.setdefault(coupon_row.bond_id, []).append(coupon_row)
+        return txns, bonds, coupons_by_bond
+
     async def _compute_summary(
         self, user_id: int, valuation_date: date, broker_account_id: int | None = None
     ) -> PortfolioSummary:
         """Compute the full portfolio summary (no cache, no publish).
+
+        The actual coupon schedules (``bond_coupons``) of the user's bonds
+        are prefetched in a single query and forwarded to the per-position
+        yield math as the authoritative dates/amounts.
 
         Args:
             user_id: User whose portfolio is summarized.
@@ -634,17 +792,7 @@ class AnalyticsService:
             portfolios (zero sums, empty lists).
         """
 
-        async with self._session_factory() as session:
-            stmt = select(Transaction).where(Transaction.user_id == user_id)
-            if broker_account_id is not None:
-                stmt = stmt.where(Transaction.broker_account_id == broker_account_id)
-            txn_result = await session.execute(stmt.order_by(Transaction.date, Transaction.id))
-            txns = list(txn_result.scalars().all())
-            bonds: dict[int, Bond] = {}
-            if txns:
-                bond_ids = {txn.bond_id for txn in txns}
-                bond_result = await session.execute(select(Bond).where(Bond.id.in_(bond_ids)))
-                bonds = {bond.id: bond for bond in bond_result.scalars().all()}
+        txns, bonds, coupons_by_bond = await self._load_summary_inputs(user_id, broker_account_id)
 
         grouped: dict[int, list[Transaction]] = {}
         for txn in txns:
@@ -676,45 +824,22 @@ class AnalyticsService:
             quantity, _ = _position_of(rows)
             if quantity <= 0:
                 continue
-            positions.append(_build_position_analytics(bond, rows, valuation_date))
 
-            months = _FREQUENCY_MONTHS[bond.coupon_frequency]
-            coupon_per_period = _coupon_per_period(bond)
-            future_dates = (
-                _future_coupon_dates(bond.maturity_date, months, valuation_date)
-                if bond.maturity_date > valuation_date
-                else []
+            # Convert the bond's actual schedule (if any) to CouponPayment
+            # items; the maturity row carries the nominal on top of the
+            # coupon per the CouponPayment contract. Bonds without a stored
+            # schedule pass None, and yield_calc derives it from
+            # coupon_period_days.
+            position_cashflows = _bond_position_cashflows(coupons_by_bond.get(bond_id, []), bond)
+            positions.append(
+                _build_position_analytics(bond, rows, valuation_date, cashflows=position_cashflows)
             )
-            for coupon_date in future_dates:
-                if coupon_date <= horizon_end:
-                    next_coupons.append(
-                        CouponDue(
-                            bond_id=bond.id,
-                            isin=bond.isin,
-                            name=bond.name,
-                            date=coupon_date,
-                            amount=coupon_per_period * quantity,
-                        )
-                    )
-                cashflows.append(
-                    Cashflow(
-                        date=coupon_date,
-                        bond_id=bond.id,
-                        isin=bond.isin,
-                        kind="COUPON",
-                        amount=coupon_per_period * quantity,
-                    )
-                )
-            if bond.maturity_date > valuation_date:
-                cashflows.append(
-                    Cashflow(
-                        date=bond.maturity_date,
-                        bond_id=bond.id,
-                        isin=bond.isin,
-                        kind="MATURITY",
-                        amount=float(bond.nominal * quantity),
-                    )
-                )
+
+            bond_next_coupons, bond_cashflows = _future_bond_cashflows(
+                bond, quantity, valuation_date, horizon_end
+            )
+            next_coupons.extend(bond_next_coupons)
+            cashflows.extend(bond_cashflows)
 
         next_coupons.sort(key=lambda due: (due.date, due.bond_id))
         next_coupons = next_coupons[:_NEXT_COUPONS_MAX_EVENTS]

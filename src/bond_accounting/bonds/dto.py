@@ -11,7 +11,7 @@ from __future__ import annotations
 # Runtime import on purpose: pydantic resolves the postponed `datetime.date`
 # annotations against the module namespace (same as db/models.py).
 import datetime  # noqa: TC003
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -20,10 +20,6 @@ if TYPE_CHECKING:
 
 #: ISIN format: exactly 12 uppercase alphanumeric characters.
 ISIN_PATTERN = r"^[A-Z0-9]{12}$"
-
-#: Allowed coupon payment frequencies; matches the DB CHECK constraint
-#: (``ck_bonds_coupon_frequency``) and :data:`COUPON_FREQUENCIES`.
-CouponFrequency = Literal["ANNUAL", "SEMI_ANNUAL", "QUARTERLY"]
 
 
 class BondCreate(BaseModel):
@@ -65,7 +61,10 @@ class BondCreate(BaseModel):
             "Zero is valid (zero-coupon bond)."
         ),
     )
-    coupon_frequency: CouponFrequency = Field(description="Coupon payment frequency.")
+    coupon_period_days: int = Field(
+        ge=0,
+        description="Days between coupon payments; 0 = zero-coupon bond.",
+    )
     maturity_date: datetime.date = Field(description="Date the principal is repaid.")
     issuer: str | None = Field(default=None, description="Optional issuer name.")
 
@@ -90,7 +89,7 @@ class BondUpdate(BaseModel):
     # sense on create) and an explicit ``null`` is ignored by the service.
     nominal: int | None = Field(default=None, gt=0)
     coupon_rate: float | None = Field(default=None, ge=0)
-    coupon_frequency: CouponFrequency | None = None
+    coupon_period_days: int | None = Field(default=None, ge=0)
     maturity_date: datetime.date | None = None
     issuer: str | None = None
 
@@ -111,7 +110,7 @@ class BondDTO(BaseModel):
     name: str
     nominal: int
     coupon_rate: float
-    coupon_frequency: str
+    coupon_period_days: int
     maturity_date: datetime.date
     issuer: str | None = None
 
@@ -125,7 +124,7 @@ class BondDTO(BaseModel):
             name=obj.name,
             nominal=obj.nominal,
             coupon_rate=obj.coupon_rate,
-            coupon_frequency=obj.coupon_frequency,
+            coupon_period_days=obj.coupon_period_days,
             maturity_date=obj.maturity_date,
             issuer=obj.issuer,
         )

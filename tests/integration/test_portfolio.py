@@ -141,7 +141,7 @@ async def user_and_bond_ids(session_factory: async_sessionmaker[AsyncSession]) -
             name="OFLZ 2030",
             nominal=1000,
             coupon_rate=7.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
             owner_id=user.id,
         )
@@ -158,7 +158,7 @@ async def _add_second_bond(session_factory: async_sessionmaker[AsyncSession], ow
             name="OFLZ 2031",
             nominal=1000,
             coupon_rate=6.5,
-            coupon_frequency="SEMI_ANNUAL",
+            coupon_period_days=182,
             maturity_date=datetime.date(2031, 1, 1),
             owner_id=owner_id,
         )

@@ -12,6 +12,7 @@ with ``app.dependency_overrides.update(deps.overrides())``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
 
@@ -28,11 +29,14 @@ from bond_accounting.analytics.service import AnalyticsService  # noqa: TC001
 from bond_accounting.auth import AuthService, JwtError, JwtService
 from bond_accounting.bonds.service import BondService  # noqa: TC001
 from bond_accounting.brokers.service import BrokerService  # noqa: TC001
+from bond_accounting.market_data import BondReferenceService  # noqa: TC001
 from bond_accounting.portfolio.service import PortfolioService  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,37 @@ def get_account_operation_service() -> AccountOperationService:
     )
 
 
+def get_bond_reference_service() -> BondReferenceService:
+    """Return the :class:`BondReferenceService` bound by the application.
+
+    Raises:
+        RuntimeError: Always, unless the application installed the providers
+            from :meth:`ApiDependencies.overrides` via
+            ``app.dependency_overrides``.
+    """
+    raise RuntimeError(
+        "BondReferenceService is not configured; install ApiDependencies.overrides() "
+        "on the application via app.dependency_overrides"
+    )
+
+
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Return the :class:`~sqlalchemy.ext.asyncio.AsyncSession` factory provider.
+
+    Read-only REST endpoints that issue their own short-lived DB session
+    (e.g. ``GET /api/bonds/{isin}/coupons``) depend on this provider.
+
+    Raises:
+        RuntimeError: Always, unless the application installed the provider
+            from :meth:`ApiDependencies.overrides` via
+            ``app.dependency_overrides``.
+    """
+    raise RuntimeError(
+        "session_factory is not configured; install ApiDependencies.overrides() "
+        "on the application via app.dependency_overrides"
+    )
+
+
 def get_current_user_id(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
     jwt_service: Annotated[JwtService, Depends(get_jwt_service)],
@@ -183,6 +218,17 @@ class ApiDependencies:
             AccountOperationService; ``None`` leaves the module-level stub
             installed (it raises ``RuntimeError`` when hit), which keeps the
             six-service wiring of older callers working.
+        get_bond_reference_service: Provider returning the application's
+            BondReferenceService (MOEX reference search); ``None`` leaves the
+            module-level stub installed (it raises ``RuntimeError`` when
+            hit), which keeps the seven-service wiring of older callers
+            working.
+        get_session_factory: Provider returning the application's
+            ``async_sessionmaker[AsyncSession]`` used by read-only REST
+            endpoints that query the DB directly (e.g. bond coupons);
+            ``None`` leaves the module-level stub installed (it raises
+            ``RuntimeError`` when hit), which keeps the seven-service wiring
+            of older callers working.
     """
 
     get_auth_service: Callable[[], AuthService]
@@ -192,6 +238,8 @@ class ApiDependencies:
     get_portfolio_service: Callable[[], PortfolioService]
     get_analytics_service: Callable[[], AnalyticsService]
     get_account_operation_service: Callable[[], AccountOperationService] | None = None
+    get_bond_reference_service: Callable[[], BondReferenceService] | None = None
+    get_session_factory: Callable[[], async_sessionmaker[AsyncSession]] | None = None
 
     def overrides(self) -> dict[Callable[..., Any], Callable[..., Any]]:
         """Map the provider stubs to the bound providers.
@@ -211,7 +259,35 @@ class ApiDependencies:
         }
         if self.get_account_operation_service is not None:
             result[get_account_operation_service] = self.get_account_operation_service
+        if self.get_bond_reference_service is not None:
+            result[get_bond_reference_service] = self.get_bond_reference_service
+        if self.get_session_factory is not None:
+            result[get_session_factory] = self.get_session_factory
         return result
+
+
+def _optional_provider[T](service: T | None, name: str) -> Callable[[], T] | None:
+    """Build a bound provider for an optional service, or ``None`` when unset.
+
+    Args:
+        service: The service instance (or ``None`` when the caller omitted it).
+        name: Service name used in the ``RuntimeError`` message if a
+            configured provider is invoked without a bound service (defensive;
+            normally guarded by the ``None`` branch in the caller).
+
+    Returns:
+        A zero-argument provider returning ``service``, or ``None`` when
+        ``service`` is ``None`` (the module-level stub stays in effect).
+    """
+    if service is None:
+        return None
+
+    def _provider() -> T:
+        if service is None:
+            raise RuntimeError(f"{name} is not configured (guarded by the None branch)")
+        return service
+
+    return _provider
 
 
 def build_api_dependencies(
@@ -222,6 +298,8 @@ def build_api_dependencies(
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
     account_operation_service: AccountOperationService | None = None,
+    bond_reference_service: BondReferenceService | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> ApiDependencies:
     """Bind concrete services into ready FastAPI dependency providers.
 
@@ -236,6 +314,15 @@ def build_api_dependencies(
             for backward compatibility — when omitted, the
             ``get_account_operation_service`` stub stays in effect and
             raises ``RuntimeError`` if an account-operation endpoint is hit.
+        bond_reference_service: MOEX bond-reference search service; optional
+            for backward compatibility — when omitted, the
+            ``get_bond_reference_service`` stub stays in effect and raises
+            ``RuntimeError`` if a reference endpoint is hit.
+        session_factory: SQLAlchemy async session factory used by read-only
+            REST endpoints (e.g. bond coupons); optional for backward
+            compatibility — when omitted, the ``get_session_factory`` stub
+            stays in effect and raises ``RuntimeError`` if such an endpoint is
+            hit.
 
     Returns:
         An :class:`ApiDependencies` whose callables are ready FastAPI
@@ -261,10 +348,8 @@ def build_api_dependencies(
     def _analytics_service() -> AnalyticsService:
         return analytics_service
 
-    def _account_operation_service() -> AccountOperationService:
-        assert account_operation_service is not None  # guarded by the None branch below
-        return account_operation_service
-
+    # The three optional services share the same pattern: return None when
+    # omitted (stub stays), else a provider that returns the bound instance.
     return ApiDependencies(
         get_auth_service=_auth_service,
         get_jwt_service=_jwt_service,
@@ -272,7 +357,11 @@ def build_api_dependencies(
         get_broker_service=_broker_service,
         get_portfolio_service=_portfolio_service,
         get_analytics_service=_analytics_service,
-        get_account_operation_service=(
-            _account_operation_service if account_operation_service is not None else None
+        get_account_operation_service=_optional_provider(
+            account_operation_service, "account_operation_service"
         ),
+        get_bond_reference_service=_optional_provider(
+            bond_reference_service, "bond_reference_service"
+        ),
+        get_session_factory=_optional_provider(session_factory, "session_factory"),
     )

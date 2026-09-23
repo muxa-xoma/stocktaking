@@ -38,6 +38,7 @@ def test_create_ui_app_registers_all_pages() -> None:
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
         account_operation_service=MagicMock(),
+        bond_reference_service=MagicMock(),
     )
 
     registered = {getattr(route, "path", None) for route in nicegui_app.routes}
@@ -55,5 +56,6 @@ def test_create_ui_app_returns_none() -> None:
         portfolio_service=MagicMock(),
         analytics_service=MagicMock(),
         account_operation_service=MagicMock(),
+        bond_reference_service=MagicMock(),
     )
     assert result is None

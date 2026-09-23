@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -21,6 +21,7 @@ from bond_accounting.brokers.service import BrokerService
 from bond_accounting.config.settings import ENV_PREFIX, AuthConfig, DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
 from bond_accounting.event_bus import AsyncQueueEventBus
+from bond_accounting.market_data import BondReferenceService, MoexClient
 from bond_accounting.portfolio import PortfolioService
 
 if TYPE_CHECKING:
@@ -61,6 +62,109 @@ def auth_config() -> AuthConfig:
 def jwt_service(auth_config: AuthConfig) -> JwtService:
     """Реальный JwtService: страницы проверяют подпись настоящего токена."""
     return JwtService(auth_config)
+
+
+# --------------------------------------------------------------------------- #
+# MOEX bond-reference fixtures (in-memory ISS responder)
+# --------------------------------------------------------------------------- #
+
+#: Lowercase columns of the global ISS securities search response
+#: (``GET /iss/securities.json``); see ``MoexClient._search_candidates``.
+_MOEX_SEARCH_COLUMNS = ["secid", "isin", "shortname", "name", "group", "type", "emitent_title"]
+
+#: UPPERCASE columns of the bond-detail response
+#: (``GET /iss/engines/stock/markets/bonds/securities/{secid}.json``).
+_MOEX_DETAIL_COLUMNS = [
+    "SECID",
+    "ISIN",
+    "SHORTNAME",
+    "SECNAME",
+    "FACEVALUE",
+    "COUPONPERCENT",
+    "COUPONPERIOD",
+    "MATDATE",
+    "ISSUER",
+]
+
+
+class _MoexMock:
+    """Configurable in-memory responder for the MOEX ISS endpoints.
+
+    Default state: an empty bond registry and no errors, so the default
+    ``bond_reference_service`` is harmless for tests that never touch the
+    reference endpoints. Tests reconfigure the attributes before issuing
+    requests: the same instance is closed over by the ``moex_client``
+    transport, so changes take effect immediately.
+
+    A "bond" is one dict carrying both search-level fields (lowercase keys)
+    and bond-detail fields (UPPERCASE keys); see ``_MOEX_SEARCH_COLUMNS`` /
+    ``_MOEX_DETAIL_COLUMNS``.
+    """
+
+    def __init__(self) -> None:
+        #: Transport-level error to raise instead of answering; raised from
+        #: ``httpx.MockTransport`` it maps to ProviderUnavailableError /
+        #: ProviderTimeoutError inside ``MoexClient._get_json``.
+        self.error: Exception | None = None
+        #: Known bonds; returned by the global search regardless of ``q``
+        #: (server-side filtering is MOEX's job, not the mock's).
+        self.bonds: list[dict[str, Any]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.error is not None:
+            raise self.error
+        path = request.url.path
+        if path == "/iss/securities.json":
+            return self._securities_block(_MOEX_SEARCH_COLUMNS)
+        if path.startswith("/iss/engines/stock/markets/bonds/securities/"):
+            secid = path.removesuffix(".json").rsplit("/", maxsplit=1)[-1]
+            rows = [
+                [bond.get(column) for column in _MOEX_DETAIL_COLUMNS]
+                for bond in self.bonds
+                if bond.get("secid") == secid
+            ]
+            return httpx.Response(
+                200, json={"securities": {"columns": _MOEX_DETAIL_COLUMNS, "data": rows}}
+            )
+        if path.startswith("/iss/securities/"):
+            # Description fallback (matured bonds without an active board row);
+            # not exercised by the current tests, answered with an empty block.
+            return httpx.Response(
+                200, json={"description": {"columns": ["name", "value"], "data": []}}
+            )
+        return httpx.Response(404, json={"error": {"code": f"unexpected path {path!r}"}})
+
+    def _securities_block(self, columns: list[str]) -> httpx.Response:
+        rows = [[bond.get(column) for column in columns] for bond in self.bonds]
+        return httpx.Response(200, json={"securities": {"columns": columns, "data": rows}})
+
+
+@pytest.fixture
+def moex_mock_handler() -> _MoexMock:
+    """MOEX ISS responder with an empty bond registry by default."""
+    return _MoexMock()
+
+
+@pytest.fixture
+async def moex_client(moex_mock_handler: _MoexMock) -> AsyncGenerator[MoexClient]:
+    """A real ``MoexClient`` whose HTTP transport is the in-memory mock.
+
+    ``MoexClient`` owns its ``httpx.AsyncClient`` and offers no injection
+    point, so the module-owned client is replaced with one whose transport
+    routes to ``moex_mock_handler``; no socket is opened.
+    """
+    client = MoexClient(base_url="https://iss.moex.com", timeout_s=5.0)
+    client._http = httpx.AsyncClient(  # test seam: no public injection point
+        transport=httpx.MockTransport(moex_mock_handler), base_url="https://iss.moex.com"
+    )
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+def bond_reference_service(moex_client: MoexClient) -> BondReferenceService:
+    """Bond-reference service over the mocked MOEX client (enabled)."""
+    return BondReferenceService(client=moex_client)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +229,7 @@ def app(
     session_factory: async_sessionmaker[AsyncSession],
     event_bus: AsyncQueueEventBus,
     jwt_secret: str,
+    bond_reference_service: BondReferenceService,
 ) -> FastAPI:
     """The API application assembled like ``main.py``, with real services.
 
@@ -152,6 +257,7 @@ def app(
             portfolio_service,
             analytics_service,
             account_operation_service,
+            bond_reference_service=bond_reference_service,
         ).overrides()
     )
     return application

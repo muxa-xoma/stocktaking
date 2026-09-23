@@ -89,6 +89,12 @@ logging:
 
 event_bus:
   max_queue_size: 10000
+
+market_data:
+  enabled: true                                  # false отключает интеграцию с MOEX
+  base_url: "https://iss.moex.com"               # базовый URL MOEX ISS API
+  timeout_s: 5.0                                 # таймаут HTTP-запроса
+  cache_ttl_s: 300                               # TTL кэша поиска в памяти
 ```
 
 Подключение к базе данных задаётся структурно; async SQLAlchemy URL строится
@@ -139,6 +145,7 @@ BOND_DATABASE__SQLITE_PATH="/var/lib/bonds.db"
 BOND_EVENT_BUS__MAX_QUEUE_SIZE="5000"
 BOND_LOGGING__LEVEL="DEBUG"
 BOND_LOGGING__FORMAT="text"
+BOND_MARKET_DATA__ENABLED="false"
 ```
 
 > Примечание: старые «плоские» имена `BOND_DATABASE_URL` и
@@ -149,19 +156,56 @@ BOND_LOGGING__FORMAT="text"
 `BOND_AUTH__JWT_SECRET`. `load_settings()` возбуждает `ConfigError`, если
 конфигурация невалидна или YAML-файл повреждён.
 
+## Справочный поиск облигаций (MOEX)
+
+Модуль `market_data` (`bond_accounting.market_data`) интегрируется со
+справочным API [MOEX ISS](https://www.moex.com/) через `httpx`
+(runtime-зависимость), чтобы облигации можно было находить по ISIN или
+названию вместо ручного ввода:
+
+- `GET /api/bonds/reference/search?q=<запрос>&limit=10` — поиск
+  справочных данных облигаций по ISIN или названию (`q` обязателен,
+  1–100 символов; `limit` по умолчанию 10, максимум 50); возвращает
+  `200 {"results": [...]}` (возможно, пустой), `422` при невалидном запросе
+  или `503`, если провайдер недоступен или интеграция отключена.
+- `GET /api/bonds/{isin}/coupons` — чтение сохранённого графика купонов
+  (`bond_coupons`) облигации, упорядоченного по дате; возвращает `200`
+  `[{"coupon_date": "<ISO date>", "coupon_amount": <float>}]` (пустой список —
+  валидный результат), `404`, если ISIN не найден, или `422` при невалидном
+  ISIN. Читает только базу — без обращения к провайдеру.
+- `POST /api/bonds/{isin}/sync-coupons` — пересоздание графика купонов
+  облигации из сервиса MOEX bondization в фоновой задаче; возвращает
+  `202 {"task_id": "<uuid4().hex>"}` (статус задачи не сохраняется), `404`
+  для неизвестной облигации, `422` при невалидном ISIN или `503`, если
+  интеграция отключена.
+
+Все эндпоинты защищены JWT, как и все остальные. При отключённой
+интеграции (`market_data.enabled: false`) REST-эндпоинты возвращают `503`,
+а UI показывает статическую подсказку; при недоступности MOEX UI показывает
+ненавязчивую подсказку — ручной ввод облигаций работает в обоих случаях.
+
 ## База данных
 
 Слой работы с БД живёт в `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount`,
-  `AccountOperation` — модели SQLAlchemy 2.0 (`Mapped`/`mapped_column`) с
-  CHECK-ограничениями на `transactions.type` (`BUY`/`SELL`/`MATURE`),
-  `account_operations.type` (`DEPOSIT`/`WITHDRAWAL`/`TAX`) и
-  `bonds.coupon_frequency` (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+- `Base`, `User`, `Bond`, `BondCoupon`, `Transaction`, `Broker`,
+  `BrokerAccount`, `AccountOperation` — модели SQLAlchemy 2.0
+  (`Mapped`/`mapped_column`) с CHECK-ограничениями на `transactions.type`
+  (`BUY`/`SELL`/`MATURE`), `account_operations.type`
+  (`DEPOSIT`/`WITHDRAWAL`/`TAX`) и `bonds.coupon_period_days` (Integer,
+  NOT NULL, по умолчанию 182, `0` — бескупонная облигация; календарные дни
+  между выплатами купона).
   `Broker.commission` хранится в **процентах** (5.0 = 5%);
   `Broker.min_commission` интерпретируется в зависимости от
   `Broker.min_commission_type` (`PERCENT` или `RUBLES`);
   `BrokerAccount.broker_id` — обязательное поле (NOT NULL).
+- `BondCoupon` — одна запись на фактическую купонную выплату облигации
+  в таблице `bond_coupons` (`bond_id` FK → `bonds.id` ON DELETE CASCADE,
+  индексируется; `coupon_date`, `coupon_amount`,
+  `UNIQUE(bond_id, coupon_date)`). Таблица опциональна: пока пуста, расчёт
+  доходностей выводит график купонов из `Bond.coupon_period_days`; после
+  заполнения (например, из MOEX `bondization`) фактические даты и суммы
+  имеют приоритет.
 - `create_engine_from_settings(db_config)` — фабрика async-движка
   (`create_async_engine`); прагмы SQLite применяются через слушатель события
   `connect` (см. выше).
@@ -185,6 +229,12 @@ uv run alembic downgrade -1                              # откатить од
 uv run alembic downgrade base                            # откатить всё
 ```
 
+Вся схема живёт в единственной «схлопнутой» миграции
+(`alembic/versions/0001_initial_schema.py`): один `upgrade()` создаёт полную
+целевую схему, `downgrade()` удаляет все таблицы. Локальные базы, созданные
+старой цепочкой миграций, нужно пересоздать (приложение ещё не в продакшене;
+схлопывание — осознанное решение).
+
 Пример — применить миграции к конкретному SQLite-файлу, не меняя конфиг
 (запускать из корня проекта, чтобы `config.yaml` предоставил `auth.jwt_secret`,
 либо экспортировать `BOND_AUTH__JWT_SECRET`):
@@ -204,6 +254,7 @@ src/bond_accounting/
   auth/           # JWT-аутентификация, хеширование паролей (bcrypt)
   bonds/          # облигации: CRUD-сервис с публикацией в event bus
   brokers/        # брокеры и брокерские счета: CRUD-сервис
+  market_data/    # справочный поиск облигаций в MOEX ISS (httpx, TTL-кэш)
   account_operations/ # операции по счёту: CRUD (DEPOSIT/WITHDRAWAL/TAX)
   portfolio/      # портфель: сделки, позиции, неттинг
   yield_calc/     # доходности: YTM, текущая, НКД, график купонов

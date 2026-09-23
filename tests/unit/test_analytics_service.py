@@ -21,6 +21,7 @@ from bond_accounting.analytics.service import (
     _realized_pnl_of,
 )
 from bond_accounting.db.models import Bond, Transaction
+from bond_accounting.yield_calc import CouponPayment
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -53,7 +54,7 @@ def _bond(**overrides: object) -> Bond:
         "name": "OFLZ 2030",
         "nominal": 1000,
         "coupon_rate": 7.0,
-        "coupon_frequency": "ANNUAL",
+        "coupon_period_days": 365,
         "maturity_date": datetime.date(2030, 1, 1),
     }
     defaults.update(overrides)
@@ -209,41 +210,65 @@ def test_realized_pnl_buys_only() -> None:
 
 
 def test_future_coupon_dates_annual_grid() -> None:
-    dates = _future_coupon_dates(datetime.date(2030, 1, 1), 12, TODAY)
+    """365-day grid anchored on maturity 2030-01-01, stepped back in calendar days.
+
+    Stepping 365 days back from 2030-01-01 crosses the 2028 leap year, so the
+    intermediate grid dates drift by one day: 2030-01-01 -> 2029-01-01 ->
+    2028-01-02 -> 2027-01-02 -> 2026-01-03 (<= today, stops).
+    """
+    dates = _future_coupon_dates(datetime.date(2030, 1, 1), 365, TODAY)
     assert dates == [
-        datetime.date(2027, 1, 1),
-        datetime.date(2028, 1, 1),
+        datetime.date(2027, 1, 2),
+        datetime.date(2028, 1, 2),
         datetime.date(2029, 1, 1),
         datetime.date(2030, 1, 1),
     ]
 
 
 def test_future_coupon_dates_semi_annual_grid() -> None:
-    dates = _future_coupon_dates(datetime.date(2027, 1, 1), 6, TODAY)
-    assert dates == [datetime.date(2026, 7, 1), datetime.date(2027, 1, 1)]
+    """182-day grid anchored on maturity 2027-01-01: 2026-07-03 and 2027-01-01."""
+    dates = _future_coupon_dates(datetime.date(2027, 1, 1), 182, TODAY)
+    assert dates == [datetime.date(2026, 7, 3), datetime.date(2027, 1, 1)]
 
 
 def test_future_coupon_dates_matured_bond_is_empty() -> None:
-    assert _future_coupon_dates(datetime.date(2026, 1, 1), 12, TODAY) == []
+    assert _future_coupon_dates(datetime.date(2026, 1, 1), 365, TODAY) == []
 
 
 def test_future_coupon_dates_today_equals_maturity_is_empty() -> None:
     """Dates are strictly after today; maturity today means no future coupons."""
-    assert _future_coupon_dates(TODAY, 12, TODAY) == []
+    assert _future_coupon_dates(TODAY, 365, TODAY) == []
+
+
+def test_future_coupon_dates_zero_period_is_empty() -> None:
+    """A zero-coupon bond (period_days == 0) has no coupon grid at all."""
+    assert _future_coupon_dates(datetime.date(2030, 1, 1), 0, TODAY) == []
 
 
 def test_last_coupon_date_annual_grid() -> None:
-    assert _last_coupon_date(datetime.date(2030, 1, 1), 12, TODAY) == datetime.date(2026, 1, 1)
+    """Grid anchored on 2030-01-01: the latest grid date strictly before
+    2026-02-01 is 2026-01-02 (365-day steps drift across the 2028 leap year)."""
+    assert _last_coupon_date(datetime.date(2030, 1, 1), 365, TODAY) == datetime.date(2026, 1, 2)
 
 
 def test_last_coupon_date_semi_annual_grid() -> None:
-    """Grid anchored on 2027-01-01: the last grid date before Feb 2026 is Jan 2026."""
-    assert _last_coupon_date(datetime.date(2027, 1, 1), 6, TODAY) == datetime.date(2026, 1, 1)
+    """Grid anchored on 2027-01-01: the last grid date before Feb 2026 is 2026-01-02."""
+    assert _last_coupon_date(datetime.date(2027, 1, 1), 182, TODAY) == datetime.date(2026, 1, 2)
 
 
 def test_last_coupon_date_steps_below_maturity() -> None:
     """The last coupon may lie before the bond was even issued — that is fine."""
-    assert _last_coupon_date(datetime.date(2026, 6, 1), 12, TODAY) == datetime.date(2025, 6, 1)
+    assert _last_coupon_date(datetime.date(2026, 6, 1), 365, TODAY) == datetime.date(2025, 6, 1)
+
+
+def test_last_coupon_date_zero_period_is_none() -> None:
+    """A zero-coupon bond has no last coupon date; accrued defaults to 0.0."""
+    assert _last_coupon_date(datetime.date(2030, 1, 1), 0, TODAY) is None
+
+
+def test_last_coupon_date_degenerate_step_returns_none() -> None:
+    """Stepping below the 1900 floor bails out with None instead of looping."""
+    assert _last_coupon_date(datetime.date(2026, 6, 1), 100_000, TODAY) is None
 
 
 # --------------------------------------------------------------------- #
@@ -251,17 +276,18 @@ def test_last_coupon_date_steps_below_maturity() -> None:
 
 
 @pytest.mark.parametrize(
-    ("coupon_rate", "frequency", "expected"),
+    ("coupon_rate", "coupon_period_days", "expected"),
     [
-        (7.0, "ANNUAL", 70.0),
-        (8.0, "SEMI_ANNUAL", 40.0),
-        (8.0, "QUARTERLY", 20.0),
+        (7.0, 365, 70.0),
+        (8.0, 182, 1000 * 8 / 100 * 182 / 365),
+        (8.0, 91, 1000 * 8 / 100 * 91 / 365),
+        (7.0, 0, 0.0),  # zero-coupon: no coupon per period
     ],
 )
-def test_coupon_per_period(coupon_rate: float, frequency: str, expected: float) -> None:
-    assert _coupon_per_period(_bond(coupon_rate=coupon_rate, coupon_frequency=frequency)) == (
-        pytest.approx(expected)
-    )
+def test_coupon_per_period(coupon_rate: float, coupon_period_days: int, expected: float) -> None:
+    assert _coupon_per_period(
+        _bond(coupon_rate=coupon_rate, coupon_period_days=coupon_period_days)
+    ) == pytest.approx(expected)
 
 
 def test_coupon_per_period_scales_with_nominal() -> None:
@@ -282,12 +308,44 @@ def test_build_position_analytics_known_good() -> None:
     assert analytics.quantity == 10
     assert analytics.avg_buy_price == pytest.approx(1000.0)
     assert analytics.total_invested == pytest.approx(10_000.0)
-    assert analytics.next_coupon_date == datetime.date(2027, 1, 1)
-    # Annual 7% coupon on nominal 1000, 31 days since 2026-01-01, 365-day period.
-    assert analytics.accrued_coupon == pytest.approx(70.0 * 31 / 365)
+    # 365-day grid anchored on 2030-01-01: first future date is 2027-01-02
+    # (leap-year drift across 2028), the last grid date before today is
+    # 2026-01-02.
+    assert analytics.next_coupon_date == datetime.date(2027, 1, 2)
+    # Annual 7% coupon on nominal 1000, 30 days since 2026-01-02 (365-day period).
+    assert analytics.accrued_coupon == pytest.approx(70.0 * 30 / 365)
     assert analytics.current_yield == pytest.approx(0.07)
     assert analytics.ytm is not None
     assert analytics.ytm > 0
+
+
+def test_build_position_analytics_uses_explicit_cashflows_for_ytm() -> None:
+    """An explicit coupon schedule overrides the derived grid for the YTM.
+
+    Bond: price 1000, nominal 1000, coupon 10%, period 365, maturity
+    2027-02-01, cashflows = [CouponPayment(2027-02-01, 1050, final)] — the
+    single payment is exactly 365 days out, so
+    1000 = 1050 / (1 + r) ** (365/365) gives r = 0.05 exactly.
+    """
+    bond = _bond(
+        coupon_rate=10.0,
+        maturity_date=datetime.date(2027, 2, 1),
+    )
+    analytics = _build_position_analytics(
+        bond,
+        [_txn("BUY", 10, 1000.0, 10)],
+        TODAY,
+        cashflows=[
+            CouponPayment(payment_date=datetime.date(2027, 2, 1), amount=1050.0, is_final=True)
+        ],
+    )
+    assert analytics.ytm is not None
+    assert analytics.ytm == pytest.approx(0.05, abs=1e-6)
+    # The next-coupon grid still comes from coupon_period_days, not the schedule.
+    assert analytics.next_coupon_date == datetime.date(2027, 2, 1)
+    # Accrued: last grid date 2025-02-01 is exactly 365 days back, so the
+    # accrued coupon is capped at one full period: 1000 * 10% * 365/365.
+    assert analytics.accrued_coupon == pytest.approx(100.0)
 
 
 def test_build_position_analytics_matured_bond_has_no_yields() -> None:
@@ -318,3 +376,15 @@ def test_build_position_analytics_zero_coupon_rate() -> None:
     )
     assert analytics.accrued_coupon == pytest.approx(0.0)
     assert analytics.current_yield == pytest.approx(0.0)
+
+
+def test_build_position_analytics_zero_period_days() -> None:
+    """Zero-coupon bond (period_days == 0): closed-form YTM, no coupon grid."""
+    analytics = _build_position_analytics(
+        _bond(coupon_period_days=0), [_txn("BUY", 10, 900.0, 10)], TODAY
+    )
+    assert analytics.accrued_coupon == pytest.approx(0.0)
+    assert analytics.next_coupon_date is None
+    # 900 for 1000 nominal: a discount bond always yields something positive.
+    assert analytics.ytm is not None
+    assert analytics.ytm > 0

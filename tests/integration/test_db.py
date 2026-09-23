@@ -39,9 +39,15 @@ EXPECTED_COLUMNS = {
         "name",
         "nominal",
         "coupon_rate",
-        "coupon_frequency",
+        "coupon_period_days",
         "maturity_date",
         "issuer",
+    },
+    "bond_coupons": {
+        "id",
+        "bond_id",
+        "coupon_date",
+        "coupon_amount",
     },
     "transactions": {
         "id",
@@ -176,7 +182,7 @@ async def test_insert_and_position_computation(migrated_db_path: Path) -> None:
                     isin="RU000A0JV4L2",
                     name="Sber OFLZ",
                     coupon_rate=7.0,
-                    coupon_frequency="ANNUAL",
+                    coupon_period_days=365,
                     maturity_date=datetime.date(2030, 1, 1),
                     owner_id=user.id,
                 )
@@ -252,7 +258,7 @@ async def test_transaction_type_check_constraint(migrated_db_path: Path) -> None
                 isin="RU000A0JX0K8",
                 name="Test bond",
                 coupon_rate=5.0,
-                coupon_frequency="SEMI_ANNUAL",
+                coupon_period_days=182,
                 maturity_date=datetime.date(2031, 1, 1),
                 owner_id=user.id,
             )
@@ -285,28 +291,43 @@ async def test_transaction_type_check_constraint(migrated_db_path: Path) -> None
         await engine.dispose()
 
 
-async def test_bond_coupon_frequency_check_constraint(migrated_db_path: Path) -> None:
-    """Inserting a Bond with an invalid coupon_frequency raises IntegrityError."""
+async def test_bond_coupon_period_days_not_null(migrated_db_path: Path) -> None:
+    """A raw INSERT storing ``NULL`` for the NOT NULL ``coupon_period_days`` fails.
+
+    ``coupon_period_days`` is NOT NULL with a server default of 182. The ORM
+    model default would fill in ``182`` for an omitted value, so the NOT NULL
+    constraint is exercised with a bare SQL INSERT that supplies an explicit
+    ``NULL`` (bypassing the Python-side default); the DB rejects it with an
+    IntegrityError.
+    """
     config = DatabaseConfig(driver="sqlite", sqlite_path=str(migrated_db_path))
     engine = create_engine_from_settings(config)
     session_factory = create_session_factory(engine)
     try:
         async with session_factory() as session:
-            user = User(username="carol", password_hash="hash")
+            user = User(username="dave", password_hash="hash")
             session.add(user)
             await session.flush()
-            session.add(
-                Bond(
-                    isin="RU000A0JWXQ9",
-                    name="Bad frequency bond",
-                    coupon_rate=6.0,
-                    coupon_frequency="MONTHLY",
-                    maturity_date=datetime.date(2032, 1, 1),
-                    owner_id=user.id,
+
+            async def _insert_null_period() -> None:
+                await session.execute(
+                    text(
+                        "INSERT INTO bonds "
+                        "(owner_id, isin, name, nominal, coupon_rate, "
+                        " coupon_period_days, maturity_date) "
+                        "VALUES (:owner_id, :isin, :name, 1000, 6.0, NULL, :maturity_date)"
+                    ),
+                    {
+                        "owner_id": user.id,
+                        "isin": "RU000A0JWXQ9",
+                        "name": "Null period bond",
+                        "maturity_date": "2032-01-01",
+                    },
                 )
-            )
-            with pytest.raises(IntegrityError):
                 await session.commit()
+
+            with pytest.raises(IntegrityError):
+                await _insert_null_period()
             await session.rollback()
     finally:
         await engine.dispose()

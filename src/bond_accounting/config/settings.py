@@ -19,6 +19,8 @@ Environment variable naming (``__`` separates nesting levels):
     BOND_AUTH__JWT_SECRET, BOND_AUTH__JWT_ALGORITHM, BOND_AUTH__JWT_EXPIRES_MINUTES
     BOND_EVENT_BUS__MAX_QUEUE_SIZE
     BOND_LOGGING__LEVEL, BOND_LOGGING__FORMAT
+    BOND_MARKET_DATA__ENABLED, BOND_MARKET_DATA__BASE_URL,
+    BOND_MARKET_DATA__TIMEOUT_S, BOND_MARKET_DATA__CACHE_TTL_S
 
 Breaking change (internal convention): the old flat names
 ``BOND_DATABASE_URL`` and ``BOND_AUTH_JWT_SECRET`` no longer work; use the
@@ -186,6 +188,21 @@ class EventBusConfig(BaseModel):
     max_queue_size: int = 10000
 
 
+class MarketDataConfig(BaseModel):
+    """MOEX ISS bond reference integration settings.
+
+    ``enabled: false`` disables the integration entirely: the reference
+    service then raises :class:`ProviderUnavailableError` (REST 503, static
+    UI hint). ``base_url``/``timeout_s`` configure the MOEX ISS HTTP
+    client; ``cache_ttl_s`` the in-memory reference cache lifetime.
+    """
+
+    enabled: bool = True
+    base_url: str = "https://iss.moex.com"
+    timeout_s: float = 5.0
+    cache_ttl_s: int = 300
+
+
 class LoggingConfig(BaseModel):
     """Logging settings: root logger level and output format.
 
@@ -273,6 +290,7 @@ class Settings(BaseSettings):
     auth: AuthConfig
     event_bus: EventBusConfig = EventBusConfig()
     logging: LoggingConfig = LoggingConfig()
+    market_data: MarketDataConfig = MarketDataConfig()
 
     @classmethod
     def settings_customise_sources(

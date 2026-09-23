@@ -9,8 +9,11 @@ REST API + NiceGUI web UI served on a single port.
 
 The application lets users track a bond portfolio:
 
-- **Instruments** — bonds identified by ISIN, with nominal, coupon rate
-  (ANNUAL / SEMI_ANNUAL / QUARTERLY), and maturity date.
+- **Instruments** — bonds identified by ISIN, with nominal, coupon rate,
+  coupon period in calendar days (`coupon_period_days`: 0 = zero-coupon,
+  default 182; e.g. 91/182/364 days), and maturity date. An optional
+  `bond_coupons` table stores the actual coupon payment schedule when known;
+  otherwise the schedule is derived from `coupon_period_days`.
 - **Transactions** — BUY / SELL / MATURE operations on a bond.
 - **Account operations** — DEPOSIT / WITHDRAWAL / TAX operations on a
   broker account.
@@ -20,6 +23,10 @@ The application lets users track a bond portfolio:
   transactions (`sum(BUY) − sum(SELL) − sum(MATURE)`), never stored.
 - **Yield analytics** — YTM, current yield, accrued coupon (НКД), coupon
   schedule, portfolio summary, realized P&L.
+- **Bond reference search** — MOEX ISS lookup (by ISIN or name) that
+  auto-completes the bond creation form; served by the in-process
+  `market_data` module and REST reference endpoints. Manual bond entry
+  always works — MOEX unavailability never breaks the app.
 - **Auth** — username/password (bcrypt) with JWT (HS256); the web UI keeps
   the JWT in a `token` cookie, the REST API expects a Bearer token.
 
@@ -49,12 +56,14 @@ graph TD
         AcctOps["account_operations — account operations CRUD"]
         Analytics["analytics — portfolio metrics"]
         YieldCalc["yield_calc — pure math (no deps)"]
+        MarketData["market_data — MOEX reference search"]
         Bus["event_bus — async pub/sub"]
         DB["db — SQLAlchemy async ORM"]
     end
 
     SQLite[("SQLite (aiosqlite)")]
     Postgres[("PostgreSQL (psycopg, optional)")]
+    MoexIss["MOEX ISS API (external, optional)"]
 
     Browser --> App
     Client --> App
@@ -66,6 +75,9 @@ graph TD
     API --> Brokers
     API --> AcctOps
     API --> Analytics
+    API --> MarketData
+    UI --> MarketData
+    MarketData --> MoexIss
     UI --> Auth
     UI --> Bonds
     UI --> Portfolio
@@ -89,6 +101,8 @@ graph TD
 
 `yield_calc` is a dependency-free module of pure functions: no database, no
 event bus, no side effects — only primitive inputs (rates, dates, prices).
+`market_data` is an outbound HTTP client module (httpx against the MOEX ISS
+API) with an in-memory TTL cache — a client library, not a service boundary.
 
 ## 3. Module responsibilities
 
@@ -97,8 +111,8 @@ re-exported from each package's `__init__.py`.
 
 | Module | Responsibility | Public interface | Depends on |
 |---|---|---|---|
-| `config` | Settings from YAML + `BOND_*` env vars (pydantic-settings); logging setup incl. third-party logger unification | `load_settings()`, `Settings`, `AppConfig`, `DatabaseConfig`, `AuthConfig`, `EventBusConfig`, `LoggingConfig`; logging is configured via `bond_accounting.config.logging_setup.setup_logging()` and `reset_third_party_loggers()` (public, not re-exported through the package `__all__`) — both reset known third-party loggers (uvicorn, nicegui, sqlalchemy, alembic, fastapi) so their records flow through the single root handler | — |
-| `db` | SQLAlchemy 2.0 async ORM: models, engine & session factories | `Base`, `User`, `Bond`, `Transaction`, `AccountOperation`, `create_engine_from_settings()`, `create_session_factory()`. The models also include `Broker` and `BrokerAccount` (defined in `db/models.py`, but not re-exported through the package `__all__`) | `config` |
+| `config` | Settings from YAML + `BOND_*` env vars (pydantic-settings); logging setup incl. third-party logger unification | `load_settings()`, `Settings`, `AppConfig`, `DatabaseConfig`, `AuthConfig`, `EventBusConfig`, `MarketDataConfig`, `LoggingConfig`; logging is configured via `bond_accounting.config.logging_setup.setup_logging()` and `reset_third_party_loggers()` (public, not re-exported through the package `__all__`) — both reset known third-party loggers (uvicorn, nicegui, sqlalchemy, alembic, fastapi) so their records flow through the single root handler | — |
+| `db` | SQLAlchemy 2.0 async ORM: models (incl. `BondCoupon` → `bond_coupons`, the optional actual coupon schedule with `UNIQUE(bond_id, coupon_date)` and FK ON DELETE CASCADE), engine & session factories | `Base`, `User`, `Bond`, `BondCoupon`, `Transaction`, `AccountOperation`, `create_engine_from_settings()`, `create_session_factory()`. The models also include `Broker` and `BrokerAccount` (defined in `db/models.py`, but not re-exported through the package `__all__`) | `config` |
 | `auth` | Register/login service, JWT (HS256) issuing/verification, bcrypt hashing | `AuthService`, `JwtService`, `PasswordHasher`, `TokenPayload`, `AuthError`, `InvalidCredentialsError`, `UsernameTakenError`, `JwtError` | `db` |
 | `bonds` | Bond CRUD with EventBus publishing on change | `BondService`, `BondCreate`, `BondDTO`, `BondUpdate`, `BondError`, `BondNotFoundError`, `BondNotOwnedError`, `BondIsinDuplicateError`, `BondDeletionBlockedError` | `db`, `event_bus` |
 | `brokers` | Broker & broker-account CRUD with EventBus publishing | `BrokerService`, `BrokerCreate`, `BrokerUpdate`, `BrokerDTO`, `BrokerAccountCreate`, `BrokerAccountUpdate`, `BrokerAccountDTO`, `BrokerHasAccountsError`, `BrokerAccountHasTransactionsError` | `db`, `event_bus` |
@@ -106,9 +120,10 @@ re-exported from each package's `__init__.py`.
 | `portfolio` | Record BUY/SELL/MATURE transactions, derive positions, publish events | `PortfolioService`, `TransactionCreate`, `TransactionDTO`, `PositionDTO`, `PortfolioError`, `InvalidTransactionError`, `InsufficientPositionError` | `db`, `event_bus` |
 | `analytics` | Portfolio/position metrics, coupon schedule, cashflows, realized P&L; reacts to change events | `AnalyticsService`, `attach_to_event_bus()`, `PortfolioSummary`, `PositionAnalytics`, `Cashflow`, `CouponDue`, `RealizedPnl` | `db`, `event_bus`, `yield_calc` |
 | `yield_calc` | Pure-math yield calculations | `calculate_ytm()`, `calculate_current_yield()`, `calculate_accrued_coupon()`, `build_coupon_schedule()`, `CouponPayment`, `YtmCalculationError` | — |
+| `market_data` | MOEX ISS bond reference search: thin async httpx client, service with in-memory TTL cache, frozen `BondReference` DTO (mirrors `BondCreate`), provider error hierarchy (`503`/`404` semantics at the API layer) | `MoexClient`, `BondReferenceService`, `BondReference`, `ProviderUnavailableError`, `ProviderTimeoutError`, `NoBondsFoundError` | `config` |
 | `event_bus` | In-process async pub/sub with topic registry, backpressure, failure isolation | `EventBus`, `AsyncQueueEventBus`, `Message`, `Topic`, `ALL_TOPICS`, `RequestHandlerError`, `RequestTimeoutError` | `config` |
-| `api` | REST API router (~30 endpoints under `/api`) + dependency wiring + exception handlers | `api_router`, `build_api_dependencies()`, `register_exception_handlers()`, `ApiDependencies` (frozen dataclass with 7 provider fields), `LoginRequest`, `RegisterRequest` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations` |
-| `ui` | NiceGUI pages (login, register, home, bonds, transactions, analytics, brokers, accounts, operations) with drawer navigation, a dark theme, and modal CRUD forms (`CrudPageMixin`); `create_ui_app()` takes 7 arguments (6 services + `account_operation_service`) | `create_ui_app()` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations` |
+| `api` | REST API router (~30 endpoints under `/api`) + bond reference search (`GET /api/bonds/reference/search`, `GET /api/bonds/reference/{isin}`, JWT-protected; provider errors → 503, not found → 404) + dependency wiring + exception handlers | `api_router`, `build_api_dependencies()`, `register_exception_handlers()`, `ApiDependencies` (frozen dataclass with 8 provider fields), `LoginRequest`, `RegisterRequest` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations`, `market_data` |
+| `ui` | NiceGUI pages (login, register, home, bonds, transactions, analytics, brokers, accounts, operations) with drawer navigation, a dark theme, and modal CRUD forms (`CrudPageMixin`); `create_ui_app()` takes 8 arguments (6 services + `account_operation_service` + `bond_reference_service`) | `create_ui_app()` | `auth`, `bonds`, `portfolio`, `analytics`, `brokers`, `account_operations` |
 | `main` | Composition root: settings → engine → migrations → services → bus → UI + API → serve & shut down | `main()`, `run()` (console entry point `bond-accounting`) | all |
 | `external_bus` | Placeholder for future external bus integration (currently just a package docstring) | — | — |
 
@@ -133,7 +148,10 @@ re-exported from each package's `__init__.py`.
 - **Schema managed exclusively by Alembic** — `Base.metadata.create_all` is
   never used in application code. `alembic/env.py` is async and resolves the
   database URL itself through `load_settings()`; `alembic.ini` deliberately
-  contains no URL. `alembic upgrade head` runs in-process at startup.
+  contains no URL. `alembic upgrade head` runs in-process at startup. The
+  migration history is squashed into a single `0001_initial_schema.py`
+  (creates the complete target schema in one `upgrade()`; `downgrade()`
+  drops all tables) — pre-production app, squashing was an explicit decision.
 - **Unified third-party logging** — all known third-party loggers (uvicorn server + access,
   nicegui, sqlalchemy, alembic, fastapi) are reset by `setup_logging()` / `reset_third_party_loggers()`
   to propagate into the single root handler in the configured format and level. Uvicorn's own

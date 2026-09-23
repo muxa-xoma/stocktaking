@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from bond_accounting.auth.service import AuthService
     from bond_accounting.bonds.service import BondService
     from bond_accounting.brokers.service import BrokerService
+    from bond_accounting.market_data import BondReferenceService
     from bond_accounting.portfolio.service import PortfolioService
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ def create_ui_app(
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
     account_operation_service: AccountOperationService,
+    bond_reference_service: BondReferenceService,
 ) -> None:
     """Зарегистрировать все страницы UI (вызывается из main.py ДО ui.run()).
 
@@ -50,11 +52,13 @@ def create_ui_app(
         analytics_service: Сервис аналитики портфеля.
         account_operation_service: Сервис CRUD операций по счёту
             (пополнения, выводы, налоги).
+        bond_reference_service: Сервис справочника облигаций MOEX
+            (поиск по мере ввода в форме создания облигации).
     """
     LoginPage(auth_service, jwt_service).register()
     RegisterPage(auth_service, jwt_service).register()
     HomePage(jwt_service, portfolio_service, bond_service, broker_service).register()
-    BondsPage(jwt_service, bond_service).register()
+    BondsPage(jwt_service, bond_service, bond_reference_service).register()
     BrokersPage(jwt_service, broker_service).register()
     AccountsPage(jwt_service, broker_service).register()
     TransactionsPage(jwt_service, portfolio_service, bond_service, broker_service).register()

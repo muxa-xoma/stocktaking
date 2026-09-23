@@ -96,7 +96,13 @@ def authenticate(user: User, token: str) -> None:
 
 
 def _fire(user: User, element: Any, event_type: str, args: dict | list) -> None:
-    """Вызвать обработчики события ``event_type`` элемента (как UserInteraction.trigger)."""
+    """Вызвать обработчики события ``event_type`` элемента (как UserInteraction.trigger).
+
+    Обработчик может удалить сам элемент (например, клик по кандидату
+    справочника MOEX очищает список кандидатов): удаление очищает
+    ``_event_listeners``, поэтому после каждого обработчика проверяем
+    ``is_deleted`` — как это делает официальный ``UserInteraction.trigger``.
+    """
     client = user.client
     assert client is not None, "user simulation client is not started"
     with client:
@@ -107,6 +113,8 @@ def _fire(user: User, element: Any, event_type: str, args: dict | list) -> None:
                 listener.handler,
                 events.GenericEventArguments(sender=element, client=client, args=args),
             )
+            if element.is_deleted:
+                break
 
 
 def click(user: User, element: Any) -> None:
@@ -142,7 +150,7 @@ async def eventually(
 
 
 def make_bond(**overrides: Any) -> BondDTO:
-    """Облигация по умолчанию (ОФЗ 26207, годовой купон)."""
+    """Облигация по умолчанию (ОФЗ 26207, купон раз в 182 дня)."""
     defaults: dict[str, Any] = {
         "id": 1,
         "owner_id": 1,
@@ -150,7 +158,7 @@ def make_bond(**overrides: Any) -> BondDTO:
         "name": "ОФЗ 26207",
         "nominal": 1000,
         "coupon_rate": 8.15,
-        "coupon_frequency": "ANNUAL",
+        "coupon_period_days": 182,
         "maturity_date": date(2027, 2, 4),
         "issuer": None,
     }

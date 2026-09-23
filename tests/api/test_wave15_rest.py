@@ -144,25 +144,24 @@ async def test_api_rejects_tampered_token(client: httpx.AsyncClient, jwt_secret:
 async def _portfolio_client_with_annual_bond(
     client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
 ) -> tuple[httpx.AsyncClient, dict, datetime.date, list[datetime.date]]:
-    """Register alice, seed an annual bond matiring in ~9 years and a BUY of
-    10 units; return ``(client, headers, maturity, coupon_dates)``.
+    """Register alice, seed a 365-day-period bond maturing in ~9 years and
+    a BUY of 10 units; return ``(client, headers, maturity, coupon_dates)``.
 
-    The bond matures on June 30 of ``today.year + 9`` so that (a) every coupon
-    grid date is strictly in the future and (b) the maturity payment is always
-    within the 3650-day default cashflows horizon, for any run date.
+    The bond matures on June 30 of ``today.year + 9`` so that the maturity
+    payment is always within the 3650-day default cashflows horizon, for any
+    run date. The coupon grid mirrors ``_future_coupon_dates`` (analytics):
+    dates step backwards from the maturity in ``coupon_period_days``
+    calendar-day steps while strictly after ``today``.
     """
     headers, user_id = await _register(client)
     today = datetime.date.today()
     maturity = datetime.date(today.year + 9, 6, 30)
     coupon_dates: list[datetime.date] = []
-    year = today.year
-    while True:
-        coupon = datetime.date(year, 6, 30)
-        if coupon > today:
-            coupon_dates.append(coupon)
-        if coupon == maturity:
-            break
-        year += 1
+    coupon = maturity
+    while coupon > today:
+        coupon_dates.append(coupon)
+        coupon -= datetime.timedelta(days=365)
+    coupon_dates.reverse()
     assert coupon_dates
 
     async with session_factory() as session:
@@ -171,7 +170,7 @@ async def _portfolio_client_with_annual_bond(
             name="Coupon grid bond",
             nominal=1000,
             coupon_rate=7.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=maturity,
             owner_id=user_id,
         )

@@ -328,7 +328,7 @@ async def test_delete_account_blocked_by_transactions(
             name="OFLZ 2030",
             nominal=1000,
             coupon_rate=7.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
             owner_id=broker_account.user_id,
         )

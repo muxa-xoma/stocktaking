@@ -12,6 +12,7 @@ dependencies = [
     "alembic>=1.20.0",
     "bcrypt>=4.0.1",
     "fastapi>=0.141.1",
+    "httpx>=0.28.1",
     "msgspec>=0.21.1",
     "nicegui>=3.17.1",
     "psycopg[binary]>=3.3.6",
@@ -30,7 +31,6 @@ bond-accounting = "bond_accounting.main:run"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "httpx>=0.28.1",
     "ruff>=0.16.8",
     "mypy>=1.0.0",
     "types-pyyaml>=6.0.12.20260906",
@@ -59,9 +59,10 @@ select = [
     "N",      # pep8-naming
     "UP",     # pyupgrade
     "B",      # flake8-bugbear
-    "C4",     # flake8-comprehensions
+    "C",      # flake8-comprehensions (C4) + mccabe (C901)
     "SIM",    # flake8-simplify
     "TCH",    # flake8-type-checking
+    "PT",     # flake8-pytest-style
     "RUF",    # ruff-specific
 ]
 ignore = [
@@ -70,6 +71,8 @@ ignore = [
     "RUF001", # ambiguous-unicode-character-string (Cyrillic false positives)
     "RUF002", # ambiguous-unicode-character-docstring (Cyrillic false positives)
     "RUF003", # ambiguous-unicode-character-comment (Cyrillic false positives)
+    "RUF012", # mutable class attribute (false positives with Pydantic)
+    "UP046",  # non-pep695 Generic alias (too strict)
 ]
 
 [tool.ruff.lint.isort]

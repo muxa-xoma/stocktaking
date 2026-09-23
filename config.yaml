@@ -30,3 +30,9 @@ logging:
 
 event_bus:
   max_queue_size: 10000
+
+market_data:
+  enabled: true
+  base_url: "https://iss.moex.com"
+  timeout_s: 5.0
+  cache_ttl_s: 300

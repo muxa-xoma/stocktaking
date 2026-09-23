@@ -305,6 +305,7 @@ dependencies = [
     { name = "alembic" },
     { name = "bcrypt" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "msgspec" },
     { name = "nicegui" },
     { name = "psycopg", extra = ["binary"] },
@@ -319,7 +320,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "bandit" },
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pyrefly" },
     { name = "pytest" },
@@ -336,6 +336,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "bcrypt", specifier = ">=4.0.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "msgspec", specifier = ">=0.21.1" },
     { name = "nicegui", specifier = ">=3.17.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
@@ -350,7 +351,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.8.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=1.0.0" },
     { name = "pyrefly", specifier = ">=1.3.1" },
     { name = "pytest", specifier = ">=9.1.1" },

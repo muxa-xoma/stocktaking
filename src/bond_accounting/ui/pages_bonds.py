@@ -1,15 +1,22 @@
-"""Страница справочника облигаций (``/bonds``): создание, просмотр, правка, удаление."""
+"""Страница справочника облигаций (``/bonds``): создание, просмотр, правка, удаление.
+
+Поле ISIN в форме создания поддерживает поиск по справочнику MOEX: 300 мс
+дебаунс, выпадающий список кандидатов и автозаполнение всей формы при выборе
+кандидата (SC-7). Недоступность MOEX никогда не ломает ручной ввод.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from nicegui import ui
+from nicegui import context, ui
 
 from bond_accounting.bonds.dto import BondCreate, BondUpdate
+from bond_accounting.market_data import ProviderTimeoutError, ProviderUnavailableError
 from bond_accounting.ui.base_page import BasePage
 from bond_accounting.ui.common import fmt_date, page_header, parse_date, style_table
 from bond_accounting.ui.crud_mixin import CrudPageMixin
@@ -19,15 +26,27 @@ if TYPE_CHECKING:
 
     from bond_accounting.auth.jwt_service import JwtService, TokenPayload
     from bond_accounting.bonds.service import BondService
+    from bond_accounting.market_data import BondReference, BondReferenceService
 
 logger = logging.getLogger(__name__)
 
-#: Варианты частоты выплаты купона: значение DTO -> подпись в UI.
-_FREQUENCY_OPTIONS: dict[str, str] = {
-    "ANNUAL": "Ежегодно",
-    "SEMI_ANNUAL": "Раз в полгода",
-    "QUARTERLY": "Ежеквартально",
-}
+#: Дебаунс поиска по ISIN в справочнике MOEX, секунды (SC-7).
+_ISIN_SEARCH_DEBOUNCE_S = 0.3
+
+#: Минимальная длина запроса, при которой запускается поиск по справочнику.
+_ISIN_SEARCH_MIN_LENGTH = 2
+
+#: Сколько кандидатов запрашивать у справочника MOEX.
+_ISIN_SEARCH_LIMIT = 10
+
+#: Период купона по умолчанию в форме создания (решение пользователя 2026-09-22).
+_DEFAULT_COUPON_PERIOD_DAYS = 182
+
+#: Статичная подсказка при выключенной интеграции (``market_data.enabled = false``).
+_REFERENCE_DISABLED_HINT = "Справочник MOEX отключён — введите данные вручную"
+
+#: Подсказка при недоступности провайдера MOEX (спецификация §5).
+_REFERENCE_UNAVAILABLE_HINT = "Справочник MOEX: сервис временно недоступен, введите данные вручную"
 
 _COLUMNS: list[dict[str, Any]] = [
     {"name": "isin", "label": "ISIN", "field": "isin", "align": "left", "sortable": True},
@@ -35,10 +54,10 @@ _COLUMNS: list[dict[str, Any]] = [
     {"name": "nominal", "label": "Номинал", "field": "nominal", "align": "right"},
     {"name": "coupon_rate", "label": "Купон, %", "field": "coupon_rate", "align": "right"},
     {
-        "name": "coupon_frequency",
-        "label": "Частота купона",
-        "field": "coupon_frequency",
-        "align": "left",
+        "name": "coupon_period_days",
+        "label": "Период, дн.",
+        "field": "coupon_period_days",
+        "align": "right",
     },
     {"name": "maturity_date", "label": "Погашение", "field": "maturity_date", "align": "right"},
     {"name": "issuer", "label": "Эмитент", "field": "issuer", "align": "left"},
@@ -58,7 +77,8 @@ class _BondsState:
     (поля ``cache``, ``selected_id``, ``table``, ``create_dialog``,
     ``edit_dialog``, ``confirm_delete_dialog`` — часть интерфейса миксина).
     Виджетные поля заполняются по мере построения страницы в
-    :meth:`render`.
+    :meth:`render`. Поля ``isin_search_task`` / ``applied_isin`` обслуживают
+    дебаунс поиска по справочнику MOEX (см. :meth:`BondsPage._on_isin_change`).
     """
 
     owner_id: int
@@ -70,16 +90,20 @@ class _BondsState:
     confirm_delete_dialog: Any = None
     confirm_message: Any = None
     isin_input: Any = None
+    isin_hint: Any = None
+    isin_candidates: Any = None
+    isin_search_task: asyncio.Task[None] | None = None
+    applied_isin: str | None = None
     name_input: Any = None
     nominal_input: Any = None
     coupon_rate_input: Any = None
-    frequency_select: Any = None
+    period_days_input: Any = None
     maturity_input: Any = None
     issuer_input: Any = None
     edit_name: Any = None
     edit_nominal: Any = None
     edit_rate: Any = None
-    edit_frequency: Any = None
+    edit_period_days: Any = None
     edit_maturity: Any = None
     edit_issuer: Any = None
 
@@ -118,9 +142,15 @@ class BondsPage(BasePage, CrudPageMixin):
     not_found_message: ClassVar[str] = "Облигация не найдена"
     delete_guard_error: ClassVar[type[Exception] | tuple[type[Exception], ...]] = ()
 
-    def __init__(self, jwt_service: JwtService, bond_service: BondService) -> None:
+    def __init__(
+        self,
+        jwt_service: JwtService,
+        bond_service: BondService,
+        bond_reference_service: BondReferenceService,
+    ) -> None:
         super().__init__(jwt_service)
         self.bond_service = bond_service
+        self.bond_reference_service = bond_reference_service
 
     # -- Хуки CRUD ----------------------------------------------------------
 
@@ -136,9 +166,7 @@ class BondsPage(BasePage, CrudPageMixin):
                 "name": bond.name,
                 "nominal": bond.nominal,
                 "coupon_rate": bond.coupon_rate,
-                "coupon_frequency": _FREQUENCY_OPTIONS.get(
-                    bond.coupon_frequency, bond.coupon_frequency
-                ),
+                "coupon_period_days": bond.coupon_period_days,
                 "maturity_date": fmt_date(bond.maturity_date),
                 "issuer": bond.issuer or "—",
             }
@@ -150,7 +178,7 @@ class BondsPage(BasePage, CrudPageMixin):
         state.edit_name.value = entity.name
         state.edit_nominal.value = float(entity.nominal)
         state.edit_rate.value = entity.coupon_rate
-        state.edit_frequency.value = entity.coupon_frequency
+        state.edit_period_days.value = float(entity.coupon_period_days)
         state.edit_maturity.value = entity.maturity_date.isoformat()
         state.edit_issuer.value = entity.issuer or ""
         state.confirm_message.set_text(
@@ -167,12 +195,15 @@ class BondsPage(BasePage, CrudPageMixin):
 
     def _build_create_dto(self, state: _BondsState) -> BondCreate:
         """Собрать ``BondCreate`` из полей формы создания."""
+        period_days = state.period_days_input.value
+        if period_days is None or str(period_days).strip() == "":
+            raise ValueError("Период купона обязателен")
         return BondCreate(
             isin=state.isin_input.value or "",
             name=state.name_input.value or "",
             nominal=int(state.nominal_input.value or 0),
             coupon_rate=float(state.coupon_rate_input.value or 0),
-            coupon_frequency=state.frequency_select.value,
+            coupon_period_days=int(period_days),
             maturity_date=parse_date(state.maturity_input.value, "Дата погашения"),
             issuer=state.issuer_input.value or None,
         )
@@ -183,7 +214,11 @@ class BondsPage(BasePage, CrudPageMixin):
             name=state.edit_name.value,
             nominal=int(state.edit_nominal.value) if state.edit_nominal.value is not None else None,
             coupon_rate=state.edit_rate.value,
-            coupon_frequency=state.edit_frequency.value,
+            coupon_period_days=(
+                int(state.edit_period_days.value)
+                if state.edit_period_days.value is not None
+                else None
+            ),
             maturity_date=(
                 parse_date(state.edit_maturity.value, "Дата погашения")
                 if state.edit_maturity.value
@@ -202,7 +237,23 @@ class BondsPage(BasePage, CrudPageMixin):
         """Создать облигацию через сервис и залогировать факт создания."""
         bond = await self.bond_service.create(dto, user_id=state.owner_id)
         logger.info("UI: создана облигация isin=%s", bond.isin)
+        self._schedule_populate_coupons(bond.isin)
         return bond
+
+    def _schedule_populate_coupons(self, isin: str) -> None:
+        """Запустить авто-заполнение купонов после создания (DC-5).
+
+        Fire-and-forget: вызываем ``schedule_populate_coupons`` без ожидания.
+        Сбой запуска (в т.ч. отсутствие session_factory) не должен прервать
+        сохранение или показать ошибку пользователю, поэтому ловим всё в
+        ``logger.warning``.
+        """
+        try:
+            self.bond_reference_service.schedule_populate_coupons(isin)
+        except Exception:
+            logger.warning(
+                "UI: не удалось запустить авто-заполнение купонов isin=%s", isin, exc_info=True
+            )
 
     async def _service_update(self, state: _BondsState, entity_id: int, dto: BondUpdate) -> Any:
         """Обновить облигацию через сервис."""
@@ -220,9 +271,144 @@ class BondsPage(BasePage, CrudPageMixin):
         state.name_input.value = None
         state.nominal_input.value = 1000
         state.coupon_rate_input.value = None
-        state.frequency_select.value = "ANNUAL"
+        state.period_days_input.value = _DEFAULT_COUPON_PERIOD_DAYS
         state.maturity_input.value = None
         state.issuer_input.value = None
+        state.applied_isin = None
+        self._cancel_isin_search(state)
+        self._clear_isin_candidates(state)
+        state.isin_hint.set_visibility(False)
+        if not self._is_reference_enabled():
+            state.isin_hint.set_text(_REFERENCE_DISABLED_HINT)
+            state.isin_hint.set_visibility(True)
+
+    # -- Поиск по справочнику MOEX -------------------------------------------
+
+    def _is_reference_enabled(self) -> bool:
+        """Return whether the MOEX reference integration is enabled.
+
+        The service itself raises ``ProviderUnavailableError`` from both
+        methods when disabled (spec §5); for the static create-form hint the
+        page reads the service's public ``enabled`` flag (SC-3/SC-5).
+        """
+        return self.bond_reference_service.enabled
+
+    async def _on_isin_change(self, state: _BondsState, e: Any) -> None:
+        """React to ISIN edits: cancel stale searches, schedule a debounced one.
+
+        NiceGUI has no built-in debounce for ``on_value_change``, so the
+        300 ms debounce (SC-7) is implemented with asyncio task
+        cancellation: every keystroke cancels the pending delayed-search
+        task and schedules a new one; the search only runs when no further
+        input arrives within the delay.
+        """
+        value = e.value if isinstance(e.value, str) else ""
+        if state.applied_isin is not None and value == state.applied_isin:
+            # Auto-completion just wrote the selected candidate's ISIN into
+            # the field; this programmatic change must not re-trigger the
+            # search (NiceGUI fires on_value_change on server-side sets too).
+            state.applied_isin = None
+            return
+        if not self._is_reference_enabled():
+            return
+        self._cancel_isin_search(state)
+        self._clear_isin_candidates(state)
+        state.isin_hint.set_text("")
+        state.isin_hint.set_visibility(False)
+        query = value.strip()
+        if len(query) < _ISIN_SEARCH_MIN_LENGTH:
+            return
+        state.isin_search_task = asyncio.create_task(self._search_isin_after_debounce(state, query))
+
+    def _cancel_isin_search(self, state: _BondsState) -> None:
+        """Cancel the pending debounced ISIN search, if any."""
+        task = state.isin_search_task
+        if task is not None and not task.done():
+            task.cancel()
+        state.isin_search_task = None
+
+    def _clear_isin_candidates(self, state: _BondsState) -> None:
+        """Hide and empty the ISIN candidate drop-down."""
+        state.isin_candidates.clear()
+        state.isin_candidates.set_visibility(False)
+
+    def _on_create_dialog_change(self, state: _BondsState, e: Any) -> None:
+        """Отменить висящий ISIN-поиск при закрытии окна создания (DC-6a).
+
+        «Отмена» и успешное создание закрывают окно через ``close()`` без
+        запуска ``_reset_create_form``, поэтому отложенная задача дебаунса
+        иначе осталась бы висеть до teardown. Вызов идемпотентен: при открытии
+        (``e.value`` истинно) и без активной задачи ничего не делает.
+        """
+        if e.value:
+            return
+        self._cancel_isin_search(state)
+        self._clear_isin_candidates(state)
+
+    def _cancel_isin_search_on_delete(self, state: _BondsState) -> None:
+        """Отменить ISIN-поиск при разборе страницы/клиента (DC-6b).
+
+        Хук ``context.client.on_delete`` срабатывает при удалении клиента
+        (закрытие вкладки, дисконнект, завершение приложения). Делаем
+        best-effort, чтобы сбой на teardown не всплывал в приложение.
+        """
+        try:
+            self._cancel_isin_search(state)
+        except Exception:
+            logger.debug("UI: отмена ISIN-поиска при завершении страницы не удалась", exc_info=True)
+
+    async def _search_isin_after_debounce(self, state: _BondsState, query: str) -> None:
+        """Wait out the debounce delay, then run the reference search."""
+        try:
+            await asyncio.sleep(_ISIN_SEARCH_DEBOUNCE_S)
+        except asyncio.CancelledError:
+            return  # superseded by a newer keystroke
+        await self._run_isin_search(state, query)
+
+    async def _run_isin_search(self, state: _BondsState, query: str) -> None:
+        """Search MOEX references and render candidates or the error hint.
+
+        Provider failures are non-intrusive: a hint is shown, the candidate
+        list is hidden and the form stays fully usable for manual entry.
+        """
+        try:
+            results = await self.bond_reference_service.search(query, limit=_ISIN_SEARCH_LIMIT)
+        except (ProviderTimeoutError, ProviderUnavailableError) as exc:
+            logger.warning("UI: поиск ISIN %r не выполнен: %s", query, exc)
+            self._clear_isin_candidates(state)
+            state.isin_hint.set_text(_REFERENCE_UNAVAILABLE_HINT)
+            state.isin_hint.set_visibility(True)
+            return
+        self._render_isin_candidates(state, results)
+
+    def _render_isin_candidates(self, state: _BondsState, results: list[BondReference]) -> None:
+        """Render the candidate drop-down under the ISIN field.
+
+        Each candidate shows «ISIN — имя — погашение (ГГГГ-ММ)»; clicking it
+        auto-fills the whole create form via :meth:`_apply_reference`.
+        """
+        state.isin_candidates.clear()
+        with state.isin_candidates:
+            for ref in results:
+                ui.button(
+                    f"{ref.isin} — {ref.name} — погашение ({ref.maturity_date:%Y-%m})",
+                    on_click=partial(self._apply_reference, state, ref),
+                ).props("flat dense align=left").classes("w-full no-caps text-caption")
+        state.isin_candidates.set_visibility(bool(results))
+
+    def _apply_reference(self, state: _BondsState, ref: BondReference) -> None:
+        """Fill the create form from the selected MOEX reference candidate."""
+        state.applied_isin = ref.isin
+        state.isin_input.value = ref.isin
+        state.name_input.value = ref.name
+        state.nominal_input.value = float(ref.nominal)
+        state.coupon_rate_input.value = ref.coupon_rate
+        state.period_days_input.value = ref.coupon_period_days
+        state.maturity_input.value = ref.maturity_date.isoformat()
+        state.issuer_input.value = ref.issuer or ""
+        self._cancel_isin_search(state)
+        self._clear_isin_candidates(state)
+        state.isin_hint.set_visibility(False)
 
     # -- Страница ------------------------------------------------------------
 
@@ -247,14 +433,26 @@ class BondsPage(BasePage, CrudPageMixin):
 
         with ui.dialog() as create_dialog, ui.card().classes("bg-[#1e293b] text-white w-96"):
             state.create_dialog = create_dialog
+            state.create_dialog.on_value_change(partial(self._on_create_dialog_change, state))
             ui.label("Новая облигация").classes("text-h6")
             with ui.column().classes("w-full gap-2"):
                 state.isin_input = ui.input("ISIN", validation=_ISIN_RULES)
+                state.isin_input.on_value_change(partial(self._on_isin_change, state))
+                state.isin_hint = ui.label("").classes("text-caption opacity-70")
+                state.isin_hint.set_visibility(False)
+                if not self._is_reference_enabled():
+                    state.isin_hint.set_text(_REFERENCE_DISABLED_HINT)
+                    state.isin_hint.set_visibility(True)
+                state.isin_candidates = ui.column().classes("w-full gap-1")
+                state.isin_candidates.set_visibility(False)
                 state.name_input = ui.input("Название")
                 state.nominal_input = ui.number("Номинал", value=1000, min=1)
                 state.coupon_rate_input = ui.number("Купонная ставка, %")
-                state.frequency_select = ui.select(
-                    _FREQUENCY_OPTIONS, value="ANNUAL", label="Частота купона"
+                state.period_days_input = ui.number(
+                    "Период купона (дни, 0 — бескупонная)",
+                    value=_DEFAULT_COUPON_PERIOD_DAYS,
+                    min=0,
+                    precision=0,
                 )
                 state.maturity_input = ui.date_input("Дата погашения")
                 state.issuer_input = ui.input("Эмитент (необязательно)")
@@ -269,7 +467,9 @@ class BondsPage(BasePage, CrudPageMixin):
                 state.edit_name = ui.input("Название")
                 state.edit_nominal = ui.number("Номинал")
                 state.edit_rate = ui.number("Купонная ставка, %")
-                state.edit_frequency = ui.select(_FREQUENCY_OPTIONS, label="Частота купона")
+                state.edit_period_days = ui.number(
+                    "Период купона (дни, 0 — бескупонная)", min=0, precision=0
+                )
                 state.edit_maturity = ui.date_input("Дата погашения")
                 state.edit_issuer = ui.input("Эмитент (необязательно)")
             with ui.row().classes("w-full justify-end gap-2"):
@@ -289,5 +489,7 @@ class BondsPage(BasePage, CrudPageMixin):
                 ui.button("Нет", on_click=confirm_dialog.close).props("flat")
 
         table.on("rowClick", partial(self._on_table_select, state))
+        # Отменить висящий ISIN-поиск при разборе страницы/клиента (DC-6b).
+        context.client.on_delete(partial(self._cancel_isin_search_on_delete, state))
 
         await self._reload(state)

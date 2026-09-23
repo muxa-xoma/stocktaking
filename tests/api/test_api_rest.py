@@ -156,9 +156,12 @@ async def test_create_bond_invalid_isin_unprocessable(client: httpx.AsyncClient)
     assert response.status_code == 422
 
 
-async def test_create_bond_invalid_frequency_unprocessable(client: httpx.AsyncClient) -> None:
+async def test_create_bond_negative_coupon_period_days_unprocessable(
+    client: httpx.AsyncClient,
+) -> None:
+    """A negative coupon period (days) is a data-entry error: HTTP 422."""
     headers = await _register_and_login(client)
-    invalid = {**BOND_PAYLOAD, "coupon_frequency": "MONTHLY"}
+    invalid = {**BOND_PAYLOAD, "coupon_period_days": -1}
     response = await client.post("/api/bonds", json=invalid, headers=headers)
     assert response.status_code == 422
 

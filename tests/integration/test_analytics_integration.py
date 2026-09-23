@@ -20,7 +20,7 @@ from alembic.config import Config as AlembicConfig
 from bond_accounting.analytics import AnalyticsService, attach_to_event_bus
 from bond_accounting.config.settings import DatabaseConfig, EventBusConfig
 from bond_accounting.db.engine import create_engine_from_settings, create_session_factory
-from bond_accounting.db.models import Bond, Broker, BrokerAccount, User
+from bond_accounting.db.models import Bond, BondCoupon, Broker, BrokerAccount, User
 from bond_accounting.event_bus import AsyncQueueEventBus, Topic
 from bond_accounting.portfolio import PortfolioService, TransactionCreate
 
@@ -152,7 +152,7 @@ async def user_and_bond_ids(session_factory: async_sessionmaker[AsyncSession]) -
             name="OFLZ 2030",
             nominal=1000,
             coupon_rate=7.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
             owner_id=user.id,
         )
@@ -220,7 +220,11 @@ async def test_portfolio_summary_positions_and_realized_pnl(
     assert position.quantity == 6
     assert position.avg_buy_price == pytest.approx(1000.0)
     assert position.total_invested == pytest.approx(6000.0)
-    assert position.next_coupon_date == datetime.date(2027, 1, 1)
+    # Day-stepped grid anchored on maturity 2030-01-01 (risk R5): stepping
+    # back 365 days drifts across the leap day, so coupon dates are
+    # 2027-01-02, 2028-01-02, 2029-01-01, 2030-01-01 (not the month-anchored
+    # Jan-1 dates of the legacy per-frequency model).
+    assert position.next_coupon_date == datetime.date(2027, 1, 2)
 
     assert summary.total_invested == pytest.approx(6000.0)
 
@@ -231,10 +235,11 @@ async def test_portfolio_summary_positions_and_realized_pnl(
     assert summary.realized_pnl.total == pytest.approx(195.0)
 
     # next_coupons: 7% of 1000 nominal annually on 6 units, ~24-month horizon
-    # (TODAY=2026-02-01 → horizon end 2028-02-01, so 2027 and 2028 only).
+    # (TODAY=2026-02-01 → horizon end 2028-02-01, so the 2027 and 2028
+    # day-stepped coupon dates only).
     assert [due.date for due in summary.next_coupons] == [
-        datetime.date(2027, 1, 1),
-        datetime.date(2028, 1, 1),
+        datetime.date(2027, 1, 2),
+        datetime.date(2028, 1, 2),
     ]
     assert all(due.amount == pytest.approx(70.0 * 6) for due in summary.next_coupons)
     assert all(due.isin == "RU000A0JX0J2" for due in summary.next_coupons)
@@ -242,8 +247,8 @@ async def test_portfolio_summary_positions_and_realized_pnl(
     # upcoming_cashflows: every future coupon (no horizon) + the maturity
     # repayment of the nominal for the 6 remaining units.
     assert [(flow.date, flow.kind) for flow in summary.upcoming_cashflows] == [
-        (datetime.date(2027, 1, 1), "COUPON"),
-        (datetime.date(2028, 1, 1), "COUPON"),
+        (datetime.date(2027, 1, 2), "COUPON"),
+        (datetime.date(2028, 1, 2), "COUPON"),
         (datetime.date(2029, 1, 1), "COUPON"),
         (datetime.date(2030, 1, 1), "COUPON"),
         (datetime.date(2030, 1, 1), "MATURITY"),
@@ -355,6 +360,55 @@ async def test_get_position_analytics_closed_position_returns_none(
     await portfolio_service.add_transaction(user_id, _txn(bond_id, "SELL", 10, 1050.0, 15))
 
     assert await analytics_service.get_position_analytics(user_id, bond_id, today=TODAY) is None
+
+
+async def test_get_position_analytics_actual_coupon_schedule_changes_ytm(
+    analytics_service: AnalyticsService,
+    portfolio_service: PortfolioService,
+    session_factory: async_sessionmaker[AsyncSession],
+    user_and_bond_ids: tuple[int, int],
+) -> None:
+    """A populated ``bond_coupons`` schedule is authoritative for YTM.
+
+    The actual dates/amounts replace the grid derived from
+    ``coupon_period_days`` inside ``calculate_ytm`` (see the
+    ``BondCoupon`` docstring), so a materially richer schedule raises
+    the yield. The grid still governs ``next_coupon_date``.
+    """
+    user_id, bond_id = user_and_bond_ids
+    await portfolio_service.add_transaction(user_id, _txn(bond_id, "BUY", 10, 1000.0, 10))
+
+    baseline = await analytics_service.get_position_analytics(user_id, bond_id, today=TODAY)
+    assert baseline is not None
+    assert baseline.ytm is not None
+
+    # Actual schedule: 100 per bond per payment (10% on the 1000 nominal)
+    # instead of the derived 7% annual grid.
+    async with session_factory() as session:
+        session.add_all(
+            [
+                BondCoupon(
+                    bond_id=bond_id, coupon_date=datetime.date(2026, 8, 1), coupon_amount=100.0
+                ),
+                BondCoupon(
+                    bond_id=bond_id, coupon_date=datetime.date(2027, 8, 1), coupon_amount=100.0
+                ),
+                BondCoupon(
+                    bond_id=bond_id, coupon_date=datetime.date(2028, 8, 1), coupon_amount=100.0
+                ),
+                BondCoupon(
+                    bond_id=bond_id, coupon_date=datetime.date(2030, 1, 1), coupon_amount=100.0
+                ),
+            ]
+        )
+        await session.commit()
+
+    with_schedule = await analytics_service.get_position_analytics(user_id, bond_id, today=TODAY)
+    assert with_schedule is not None
+    assert with_schedule.ytm is not None
+    assert with_schedule.ytm > baseline.ytm
+    # next_coupon_date stays anchored on the coupon_period_days grid.
+    assert with_schedule.next_coupon_date == baseline.next_coupon_date
 
 
 # --------------------------------------------------------------------- #

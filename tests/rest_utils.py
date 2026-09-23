@@ -23,7 +23,7 @@ BOND_PAYLOAD = {
     "name": "OFLZ 2030",
     "nominal": 1000,
     "coupon_rate": 7.0,
-    "coupon_frequency": "ANNUAL",
+    "coupon_period_days": 182,
     "maturity_date": "2030-01-01",
 }
 
@@ -153,7 +153,7 @@ def _bond_payload(isin: str, **overrides: object) -> dict:
         "isin": isin,
         "name": "Wave 15 bond",
         "coupon_rate": 7.0,
-        "coupon_frequency": "ANNUAL",
+        "coupon_period_days": 182,
         "maturity_date": "2030-01-01",
     }
     payload.update(overrides)

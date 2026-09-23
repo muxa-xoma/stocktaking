@@ -164,7 +164,7 @@ def _create_data(isin: str, **overrides: object) -> BondCreate:
         "name": "Test bond",
         "nominal": 1000,
         "coupon_rate": 7.5,
-        "coupon_frequency": "ANNUAL",
+        "coupon_period_days": 365,
         "maturity_date": datetime.date(2030, 1, 1),
         "issuer": "Test issuer",
     }
@@ -186,7 +186,7 @@ async def test_create_returns_dto_and_persists_row(bonds_env) -> None:
     assert dto.name == "Test bond"
     assert dto.nominal == 1000
     assert dto.coupon_rate == 7.5
-    assert dto.coupon_frequency == "ANNUAL"
+    assert dto.coupon_period_days == 365
     assert dto.maturity_date == datetime.date(2030, 1, 1)
     assert dto.issuer == "Test issuer"
 

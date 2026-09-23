@@ -12,11 +12,26 @@ from __future__ import annotations
 # annotations of the request models against the module namespace.
 import datetime  # noqa: TC003
 import logging
+import uuid
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    status,
+)
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import (  # noqa: TC002 (FastAPI resolves get_type_hints() at route-registration time)
+    AsyncSession,
+    async_sessionmaker,
+)
 
 from bond_accounting.account_operations.dto import (
     AccountOperationCreate,
@@ -42,12 +57,19 @@ from bond_accounting.api.deps import (
     get_account_operation_service,
     get_analytics_service,
     get_auth_service,
+    get_bond_reference_service,
     get_bond_service,
     get_broker_service,
     get_current_user_id,
     get_portfolio_service,
+    get_session_factory,
 )
-from bond_accounting.auth import AuthError, AuthService, InvalidCredentialsError, UsernameTakenError
+from bond_accounting.auth import (
+    AuthError,
+    AuthService,
+    InvalidCredentialsError,
+    UsernameTakenError,
+)
 from bond_accounting.bonds import BondDeletionBlockedError
 from bond_accounting.bonds.dto import BondCreate, BondDTO, BondUpdate
 from bond_accounting.bonds.service import (
@@ -72,6 +94,13 @@ from bond_accounting.brokers.service import (
     BrokerNameDuplicateError,
     BrokerNotFoundError,
     BrokerService,
+)
+from bond_accounting.db.models import BondCoupon
+from bond_accounting.market_data import (
+    BondReferenceService,
+    NoBondsFoundError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from bond_accounting.portfolio.dto import (
     PositionDTO,
@@ -191,6 +220,52 @@ class BrokerAccountUpdateRequest(BaseModel):
     closed_at: datetime.date | None = None
 
 
+class BondReferenceResponse(BaseModel):
+    """MOEX bond reference as returned by the reference endpoints.
+
+    Serializable response shape mirroring the frozen ``BondReference``
+    dataclass from :mod:`bond_accounting.market_data` (SC-3/SC-4); built
+    from it with ``model_validate`` thanks to ``from_attributes``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    isin: str = Field(description="ISIN of the bond.")
+    name: str = Field(description="Short name of the bond.")
+    nominal: int = Field(description="Face value in currency units.")
+    coupon_rate: float = Field(description="Annual coupon rate in percent; 0 for zero-coupon.")
+    coupon_period_days: int = Field(description="Days between coupons; 0 = zero-coupon bond.")
+    maturity_date: datetime.date = Field(description="Maturity date.")
+    issuer: str | None = Field(default=None, description="Optional issuer name.")
+
+
+class BondReferenceSearchResponse(BaseModel):
+    """Search-result envelope for ``GET /api/bonds/reference/search``."""
+
+    results: list[BondReferenceResponse] = Field(description="Matching bond references.")
+
+
+class BondCouponResponse(BaseModel):
+    """One saved ``bond_coupons`` schedule row returned by the coupons endpoint.
+
+    Read from the DB only (no MOEX round-trip); an empty saved schedule is a
+    valid 200 with an empty list (DC-4b).
+    """
+
+    coupon_date: datetime.date = Field(description="Coupon payment date.")
+    coupon_amount: float = Field(description="Coupon cash amount per payment.")
+
+
+class SyncCouponsResponse(BaseModel):
+    """Payload for ``POST /api/bonds/{isin}/sync-coupons``.
+
+    Only the task-creation result is returned; no task status is persisted (user
+    decision 2026-09-23, DC-4a).
+    """
+
+    task_id: str = Field(description="Fresh task id (uuid4().hex) of the spawned background job.")
+
+
 # --------------------------------------------------------------------------- #
 # auth endpoints (public)
 # --------------------------------------------------------------------------- #
@@ -249,17 +324,28 @@ async def create_bond(
     data: BondCreate,
     user_id: Annotated[int, Depends(get_current_user_id)],
     bond_service: Annotated[BondService, Depends(get_bond_service)],
+    bond_reference_service: Annotated[BondReferenceService, Depends(get_bond_reference_service)],
 ) -> BondDTO:
     """Create a bond owned by the calling user.
 
     Any authenticated user may create a bond; only its owner may later
     update or delete it.
 
+    After a successful create the bond's coupon schedule is auto-populated
+    from MOEX fire-and-forget (DC-5). The trigger is wrapped in ``try/except``
+    and the background job swallows all errors itself (DC-3), so a populate
+    failure can never alter the 201 response.
+
     Raises:
         HTTPException: 409 when the ISIN already exists (mapped by
             :func:`register_exception_handlers`).
     """
-    return await bond_service.create(data, user_id=user_id)
+    bond = await bond_service.create(data, user_id=user_id)
+    try:
+        bond_reference_service.schedule_populate_coupons(data.isin)
+    except Exception:
+        logger.warning("Coupon auto-populate failed for isin=%s", data.isin, exc_info=True)
+    return bond
 
 
 @api_router.get("/bonds/{bond_id}", response_model=BondDTO)
@@ -327,6 +413,111 @@ async def delete_bond(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Bond {bond_id} not found"
         )
+
+
+# --------------------------------------------------------------------------- #
+# bond reference (MOEX) endpoints (bearer auth)
+# --------------------------------------------------------------------------- #
+
+
+@api_router.get("/bonds/reference/search", response_model=BondReferenceSearchResponse)
+async def search_bond_references(
+    q: Annotated[str, Query(min_length=1, max_length=100)],
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    bond_reference_service: Annotated[BondReferenceService, Depends(get_bond_reference_service)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> BondReferenceSearchResponse:
+    """Search the MOEX bond reference registry.
+
+    An empty result set is a regular 200. Provider outages and a disabled
+    integration surface as 503 (mapped by :func:`register_exception_handlers`).
+    """
+    results = await bond_reference_service.search(q, limit=limit)
+    return BondReferenceSearchResponse(
+        results=[BondReferenceResponse.model_validate(ref) for ref in results]
+    )
+
+
+@api_router.get("/bonds/reference/{isin}", response_model=BondReferenceResponse)
+async def get_bond_reference(
+    isin: Annotated[str, Path(min_length=1, max_length=64)],
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    bond_reference_service: Annotated[BondReferenceService, Depends(get_bond_reference_service)],
+) -> BondReferenceResponse:
+    """Fetch one MOEX bond reference by exact (case-insensitive) ISIN.
+
+    Raises:
+        HTTPException: 404 when the ISIN is unknown (mapped by
+            :func:`register_exception_handlers`), 503 when the provider is
+            unavailable or the integration is disabled.
+    """
+    reference = await bond_reference_service.get_by_isin(isin)
+    return BondReferenceResponse.model_validate(reference)
+
+
+@api_router.get("/bonds/{isin}/coupons", response_model=list[BondCouponResponse])
+async def get_bond_coupons(
+    isin: Annotated[str, Path(min_length=1, max_length=64)],
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    bond_service: Annotated[BondService, Depends(get_bond_service)],
+    session_factory: Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)],
+) -> list[BondCouponResponse]:
+    """Read the saved coupon schedule (``bond_coupons``) for a bond.
+
+    Reads the DB only — no provider round-trip. An empty saved schedule is a
+    valid 200 (``[]``), never an error.
+
+    Raises:
+        HTTPException: 404 when the ISIN is unknown (raises
+            :class:`~bond_accounting.bonds.service.BondNotFoundError`, mapped by
+            :func:`register_exception_handlers`).
+    """
+    bond = await bond_service.get_by_isin(isin)
+    if bond is None:
+        raise BondNotFoundError(f"Bond with ISIN {isin!r} not found")
+    async with session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(BondCoupon)
+                .where(BondCoupon.bond_id == bond.id)
+                .order_by(BondCoupon.coupon_date, BondCoupon.id)
+            )
+        ).all()
+    return [
+        BondCouponResponse(coupon_date=row.coupon_date, coupon_amount=row.coupon_amount)
+        for row in rows
+    ]
+
+
+@api_router.post(
+    "/bonds/{isin}/sync-coupons",
+    response_model=SyncCouponsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def sync_bond_coupons(
+    isin: Annotated[str, Path(min_length=1, max_length=64)],
+    user_id: Annotated[int, Depends(get_current_user_id)],
+    bond_service: Annotated[BondService, Depends(get_bond_service)],
+    bond_reference_service: Annotated[BondReferenceService, Depends(get_bond_reference_service)],
+) -> SyncCouponsResponse:
+    """Respawn the bond's coupon schedule from the MOEX bondization service.
+
+    202 + ``task_id`` only — no task status is persisted (user decision
+    2026-09-23, DC-4a). The bond's existence is checked synchronously first
+    (404 unknown bond) and a disabled integration raises 503 before any job is
+    spawned. The background job is fire-and-forget (DC-3): it opens its own DB
+    session and swallows all errors, so nothing surfaces after the 202.
+
+    Returns:
+        The spawned job's fresh ``task_id`` (``uuid4().hex``).
+    """
+    bond = await bond_service.get_by_isin(isin)
+    if bond is None:
+        raise BondNotFoundError(f"Bond with ISIN {isin!r} not found")
+    if not bond_reference_service.enabled:
+        raise ProviderUnavailableError("market_data integration is disabled by config")
+    bond_reference_service.schedule_populate_coupons(isin)
+    return SyncCouponsResponse(task_id=uuid.uuid4().hex)
 
 
 # --------------------------------------------------------------------------- #
@@ -822,6 +1013,13 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(BondIsinDuplicateError, _detail_response(status.HTTP_409_CONFLICT))
     app.add_exception_handler(BondDeletionBlockedError, _detail_response(status.HTTP_409_CONFLICT))
     app.add_exception_handler(BondNotOwnedError, _detail_response(status.HTTP_403_FORBIDDEN))
+    app.add_exception_handler(NoBondsFoundError, _detail_response(status.HTTP_404_NOT_FOUND))
+    app.add_exception_handler(
+        ProviderUnavailableError, _detail_response(status.HTTP_503_SERVICE_UNAVAILABLE)
+    )
+    app.add_exception_handler(
+        ProviderTimeoutError, _detail_response(status.HTTP_503_SERVICE_UNAVAILABLE)
+    )
     app.add_exception_handler(BrokerNotFoundError, _detail_response(status.HTTP_404_NOT_FOUND))
     app.add_exception_handler(
         BrokerAccountNotFoundError, _detail_response(status.HTTP_404_NOT_FOUND)

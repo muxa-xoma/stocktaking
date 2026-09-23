@@ -4,6 +4,8 @@ Tables:
     * ``users`` — application users (JWT auth).
     * ``brokers`` — brokerage companies (commission settings).
     * ``bonds`` — bond instruments.
+    * ``bond_coupons`` — actual coupon payment schedule rows per bond
+      (optional override for the period-based derivation).
     * ``broker_accounts`` — a user's account at a specific broker.
     * ``transactions`` — buy/sell/maturity operations on bonds.
     * ``account_operations`` — non-trading money movements on a broker
@@ -23,16 +25,23 @@ from __future__ import annotations
 # annotations against the module namespace, so `datetime` must NOT live under TYPE_CHECKING.
 import datetime  # noqa: TC003
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from bond_accounting.db.base import Base
 
 #: Allowed values for :attr:`Transaction.type` (enforced by a CHECK constraint).
 TRANSACTION_TYPES = ("BUY", "SELL", "MATURE")
-
-#: Allowed values for :attr:`Bond.coupon_frequency` (enforced by a CHECK constraint).
-COUPON_FREQUENCIES = ("ANNUAL", "SEMI_ANNUAL", "QUARTERLY")
 
 #: Allowed values for :attr:`BrokerAccount.account_type` (enforced by a CHECK constraint).
 BROKER_ACCOUNT_TYPES = ("STANDARD", "IIS", "LTD")
@@ -119,12 +128,6 @@ class Bond(Base):
     """Bond instrument."""
 
     __tablename__ = "bonds"
-    __table_args__ = (
-        CheckConstraint(
-            "coupon_frequency IN ('ANNUAL', 'SEMI_ANNUAL', 'QUARTERLY')",
-            name="ck_bonds_coupon_frequency",
-        ),
-    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -135,7 +138,15 @@ class Bond(Base):
     # the column is omitted, matching ``BondCreate.nominal``.
     nominal: Mapped[int] = mapped_column(Integer, default=1000, server_default="1000")
     coupon_rate: Mapped[float] = mapped_column(Float)
-    coupon_frequency: Mapped[str] = mapped_column(String(20))
+    # Calendar days between coupon payments (MOEX ``couponperiod`` stored as-is);
+    # 0 = zero-coupon bond. Python-side ``default`` plus a DB-level
+    # ``server_default``: rows inserted outside the ORM also get 182 when the
+    # column is omitted (same pattern as ``Bond.nominal``).
+    coupon_period_days: Mapped[int] = mapped_column(
+        Integer,
+        default=182,
+        server_default="182",
+    )
     maturity_date: Mapped[datetime.date] = mapped_column(Date)
     issuer: Mapped[str | None] = mapped_column(String(255), default=None)
 
@@ -150,8 +161,34 @@ class Bond(Base):
             f"Bond(id={self.id!r}, owner_id={self.owner_id!r}, isin={self.isin!r}, "
             f"name={self.name!r}, "
             f"nominal={self.nominal!r}, coupon_rate={self.coupon_rate!r}, "
-            f"coupon_frequency={self.coupon_frequency!r}, "
+            f"coupon_period_days={self.coupon_period_days!r}, "
             f"maturity_date={self.maturity_date!r}, issuer={self.issuer!r})"
+        )
+
+
+class BondCoupon(Base):
+    """Actual coupon payment schedule row for a bond (optional override).
+
+    When the table is populated (e.g. from MOEX ``bondization`` at bond
+    creation), the actual dates/amounts take priority over the schedule
+    derived from :attr:`Bond.coupon_period_days`.
+    """
+
+    __tablename__ = "bond_coupons"
+    __table_args__ = (UniqueConstraint("bond_id", "coupon_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bond_id: Mapped[int] = mapped_column(
+        ForeignKey("bonds.id", ondelete="CASCADE"),
+        index=True,
+    )
+    coupon_date: Mapped[datetime.date] = mapped_column(Date)
+    coupon_amount: Mapped[float] = mapped_column(Float)
+
+    def __repr__(self) -> str:
+        return (
+            f"BondCoupon(id={self.id!r}, bond_id={self.bond_id!r}, "
+            f"coupon_date={self.coupon_date!r}, coupon_amount={self.coupon_amount!r})"
         )
 
 

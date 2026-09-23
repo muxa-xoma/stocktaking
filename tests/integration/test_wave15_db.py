@@ -149,7 +149,7 @@ async def test_bond_service_rejects_non_owner_mutation(
             name="Guarded bond",
             nominal=1000,
             coupon_rate=5.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
         ),
         user_id=owner_id,
@@ -181,7 +181,7 @@ async def test_sell_exact_position_succeeds_and_oversell_rejected(
             name="Sell guard bond",
             nominal=1000,
             coupon_rate=5.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
             owner_id=user_id,
         )
@@ -264,7 +264,7 @@ def _wave15_bond(isin: str) -> BondCreate:
         name="Rollback bond",
         nominal=1000,
         coupon_rate=5.0,
-        coupon_frequency="ANNUAL",
+        coupon_period_days=365,
         maturity_date=datetime.date(2030, 1, 1),
     )
 
@@ -381,7 +381,7 @@ async def test_avg_buy_price_open_position_only(
             name="Average bond",
             nominal=1000,
             coupon_rate=5.0,
-            coupon_frequency="ANNUAL",
+            coupon_period_days=365,
             maturity_date=datetime.date(2030, 1, 1),
             owner_id=users["running"],
         )

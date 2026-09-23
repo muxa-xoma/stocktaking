@@ -8,7 +8,8 @@ This is the single place where all modules of the application are assembled:
    migrations (``upgrade head``).
 3. Start the in-process event bus.
 4. Build the services (auth, bonds, brokers, portfolio, analytics, account
-   operations) and subscribe the analytics service to the bus.
+   operations, MOEX reference search) and subscribe the analytics service
+   to the bus.
 5. Register the NiceGUI pages and mount the REST API.
 6. Serve UI and REST on a single port; stop gracefully on SIGINT/SIGTERM.
 
@@ -33,7 +34,8 @@ Design decisions
 * **Event-loop layout**: ``main()`` owns the main thread's event loop;
   ``ui.run`` (blocking) runs in a worker thread. SIGINT/SIGTERM handlers are
   installed on the main loop, request a NiceGUI shutdown, and the ``finally``
-  block then stops the event bus and disposes of the engine.
+  block then stops the event bus, closes the MOEX HTTP client and disposes of
+  the engine.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ from bond_accounting.config.logging_setup import setup_logging
 from bond_accounting.config.settings import load_settings, warn_if_weak_jwt_secret
 from bond_accounting.db import create_engine_from_settings, create_session_factory
 from bond_accounting.event_bus import AsyncQueueEventBus
+from bond_accounting.market_data import BondReferenceService, MoexClient
 from bond_accounting.portfolio.service import PortfolioService
 from bond_accounting.ui import create_ui_app
 
@@ -159,6 +162,13 @@ async def main(config_path: str | None = None) -> None:
     )
 
     engine = create_engine_from_settings(settings.database)
+    moex_client = MoexClient(
+        base_url=settings.market_data.base_url,
+        timeout_s=settings.market_data.timeout_s,
+    )
+    # Tracked so the shutdown path can settle its fire-and-forget populate
+    # tasks even when an early error skips part of the try block.
+    bond_reference_service: BondReferenceService | None = None
     try:
         session_factory = create_session_factory(engine)
         await _upgrade_database(config_path)
@@ -174,6 +184,12 @@ async def main(config_path: str | None = None) -> None:
             portfolio_service = PortfolioService(session_factory, event_bus)
             analytics_service = AnalyticsService(session_factory, event_bus)
             account_operation_service = AccountOperationService(session_factory)
+            bond_reference_service = BondReferenceService(
+                client=moex_client,
+                cache_ttl_s=settings.market_data.cache_ttl_s,
+                enabled=settings.market_data.enabled,
+                session_factory=session_factory,
+            )
             attach_to_event_bus(analytics_service, event_bus)
 
             create_ui_app(
@@ -184,6 +200,7 @@ async def main(config_path: str | None = None) -> None:
                 portfolio_service,
                 analytics_service,
                 account_operation_service,
+                bond_reference_service,
             )
 
             api_dependencies = build_api_dependencies(
@@ -194,6 +211,8 @@ async def main(config_path: str | None = None) -> None:
                 portfolio_service,
                 analytics_service,
                 account_operation_service=account_operation_service,
+                bond_reference_service=bond_reference_service,
+                session_factory=session_factory,
             )
             nicegui_app.include_router(api_router)
             register_exception_handlers(nicegui_app)
@@ -256,6 +275,13 @@ async def main(config_path: str | None = None) -> None:
         finally:
             await event_bus.stop()
     finally:
+        # Settle background populate tasks BEFORE closing the shared HTTP client:
+        # an in-flight fetch holding an httpx connection races the transport
+        # teardown and can kill aclose() with a uvloop RuntimeError (fix card
+        # fix-teardown-race).
+        if bond_reference_service is not None:
+            await bond_reference_service.shutdown()
+        await moex_client.aclose()
         await engine.dispose()
         logger.info("bond-accounting stopped")
 

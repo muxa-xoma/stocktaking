@@ -28,6 +28,7 @@ from bond_accounting.analytics.service import AnalyticsService
 from bond_accounting.auth.service import AuthService
 from bond_accounting.bonds.service import BondService
 from bond_accounting.brokers.service import BrokerService
+from bond_accounting.market_data import BondReferenceService
 from bond_accounting.portfolio.service import PortfolioService
 from bond_accounting.ui import create_ui_app
 
@@ -125,6 +126,20 @@ def account_operation_service() -> AccountOperationService:
     return create_autospec(AccountOperationService, instance=True)
 
 
+@pytest.fixture
+def bond_reference_service() -> BondReferenceService:
+    """Мок сервиса справочника MOEX (поиск ISIN в форме создания облигации).
+
+    ``enabled`` — обычный атрибут экземпляра, а не часть сигнатуры класса,
+    поэтому задаётся явно (autospec его не видит). Поиск по умолчанию
+    возвращает пустой список кандидатов.
+    """
+    mock = create_autospec(BondReferenceService, instance=True)
+    mock.enabled = True
+    mock.search.return_value = []
+    return mock
+
+
 class SimUser(User):
     """``User`` с фиксой для fire-and-forget ``run_javascript``.
 
@@ -213,6 +228,7 @@ async def ui_user(
     portfolio_service: PortfolioService,
     analytics_service: AnalyticsService,
     account_operation_service: AccountOperationService,
+    bond_reference_service: BondReferenceService,
 ) -> AsyncGenerator[SimUser]:
     """Пользователь NiceGUI user simulation: реальный UI + моки сервисов.
 
@@ -235,6 +251,7 @@ async def ui_user(
                 portfolio_service=portfolio_service,
                 analytics_service=analytics_service,
                 account_operation_service=account_operation_service,
+                bond_reference_service=bond_reference_service,
             )
             async with (
                 core.app.router.lifespan_context(core.app),

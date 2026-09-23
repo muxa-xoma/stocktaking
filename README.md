@@ -82,6 +82,12 @@ logging:
 
 event_bus:
   max_queue_size: 10000
+
+market_data:
+  enabled: true                                  # false disables the MOEX integration
+  base_url: "https://iss.moex.com"               # MOEX ISS API base URL
+  timeout_s: 5.0                                 # per-request HTTP timeout
+  cache_ttl_s: 300                               # in-memory search cache TTL
 ```
 
 The database connection is configured structurally; the async SQLAlchemy
@@ -132,6 +138,7 @@ BOND_DATABASE__SQLITE_PATH="/var/lib/bonds.db"
 BOND_EVENT_BUS__MAX_QUEUE_SIZE="5000"
 BOND_LOGGING__LEVEL="DEBUG"
 BOND_LOGGING__FORMAT="text"
+BOND_MARKET_DATA__ENABLED="false"
 ```
 
 > Note: the old flat names `BOND_DATABASE_URL` and `BOND_AUTH_JWT_SECRET` are
@@ -141,19 +148,56 @@ BOND_LOGGING__FORMAT="text"
 `BOND_AUTH__JWT_SECRET`. `load_settings()` raises `ConfigError` when the
 configuration is invalid or the YAML file is malformed.
 
+## Bond reference search (MOEX)
+
+The `market_data` module (`bond_accounting.market_data`) integrates with the
+[MOEX ISS](https://www.moex.com/) bond reference API over `httpx` (a runtime
+dependency) so bonds can be looked up by ISIN or name instead of being typed
+manually:
+
+- `GET /api/bonds/reference/search?q=<query>&limit=10` — search bond
+  references by ISIN or name (`q` required, 1–100 chars; `limit` default 10,
+  max 50); returns `200 {"results": [...]}` (possibly empty), `422` for an
+  invalid query, or `503` when the provider is down or the integration is
+  disabled.
+- `GET /api/bonds/{isin}/coupons` — read the saved coupon schedule
+  (`bond_coupons`) for a bond, ordered by date; returns `200`
+  `[{"coupon_date": "<ISO date>", "coupon_amount": <float>}]` (an empty list
+  is a valid result), `404` when the ISIN is unknown, or `422` for an invalid
+  ISIN. Reads the database only — no provider round-trip.
+- `POST /api/bonds/{isin}/sync-coupons` — respawn the bond's coupon schedule
+  from the MOEX bondization service as a background job; returns
+  `202 {"task_id": "<uuid4().hex>"}` (no task status is persisted), `404` for
+  an unknown bond, `422` for an invalid ISIN, or `503` when the integration
+  is disabled.
+
+All endpoints are JWT-protected like all other endpoints. When the
+integration is disabled (`market_data.enabled: false`) the REST endpoints
+return `503` and the UI shows a static hint; when MOEX is unavailable the
+UI shows a non-intrusive hint — manual bond entry keeps working in both
+cases.
+
 ## Database
 
 The database layer lives in `bond_accounting.db` (`src/bond_accounting/db/`):
 
-- `Base`, `User`, `Bond`, `Transaction`, `Broker`, `BrokerAccount`,
-  `AccountOperation` — SQLAlchemy 2.0 models (`Mapped`/`mapped_column`), with
-  CHECK constraints on `transactions.type` (`BUY`/`SELL`/`MATURE`),
-  `account_operations.type` (`DEPOSIT`/`WITHDRAWAL`/`TAX`), and
-  `bonds.coupon_frequency` (`ANNUAL`/`SEMI_ANNUAL`/`QUARTERLY`).
+- `Base`, `User`, `Bond`, `BondCoupon`, `Transaction`, `Broker`,
+  `BrokerAccount`, `AccountOperation` — SQLAlchemy 2.0 models
+  (`Mapped`/`mapped_column`), with CHECK constraints on `transactions.type`
+  (`BUY`/`SELL`/`MATURE`), `account_operations.type`
+  (`DEPOSIT`/`WITHDRAWAL`/`TAX`), and `bonds.coupon_period_days` (Integer,
+  NOT NULL, default 182, `0` = zero-coupon bond; calendar days between
+  coupon payments).
   `Broker.commission` is stored as **percent** (5.0 = 5%);
   `Broker.min_commission` is interpreted according to
   `Broker.min_commission_type` (`PERCENT` or `RUBLES`);
   `BrokerAccount.broker_id` is mandatory (NOT NULL).
+- `BondCoupon` — one row per actual coupon payment of a bond in the
+  `bond_coupons` table (`bond_id` FK → `bonds.id` ON DELETE CASCADE, indexed;
+  `coupon_date`, `coupon_amount`, `UNIQUE(bond_id, coupon_date)`). The table
+  is optional: when empty, yield calculations derive the coupon schedule
+  from `Bond.coupon_period_days`; when populated (e.g. from MOEX
+  `bondization`), the actual dates and amounts take priority.
 - `create_engine_from_settings(db_config)` — async engine factory
   (`create_async_engine`); SQLite pragmas are applied via a `connect` event
   listener (see above).
@@ -177,6 +221,12 @@ uv run alembic downgrade -1                               # roll back one revisi
 uv run alembic downgrade base                             # roll back everything
 ```
 
+The whole schema lives in a single squashed migration
+(`alembic/versions/0001_initial_schema.py`) that creates the complete target
+schema in one `upgrade()` and drops all tables in `downgrade()`. Local
+databases created under the old migration chain must be recreated (the app
+is pre-production; squashing was an explicit decision).
+
 Example — migrate a specific SQLite file without editing the config (run from
 the project root so `config.yaml` provides `auth.jwt_secret`, or export
 `BOND_AUTH__JWT_SECRET`):
@@ -197,6 +247,7 @@ src/
     auth/         # JWT auth: password hashing, token issue/verify, service
     bonds/        # bond instruments CRUD
     brokers/      # broker & broker-account CRUD
+    market_data/  # MOEX ISS bond reference search (httpx, TTL cache)
     account_operations/ # account operations CRUD (DEPOSIT/WITHDRAWAL/TAX)
     portfolio/    # portfolio management, position netting
     yield_calc/   # yield calculations (accrued coupon, current yield, YTM)
